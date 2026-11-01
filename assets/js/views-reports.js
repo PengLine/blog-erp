@@ -318,7 +318,7 @@ window.REPORTS = (function () {
     const typeNet = (m, t) => r2((byType[t] || []).reduce((s, a) => s - nv(m, a.code), 0));
     const revenue = typeNet(net, 'revenue'), cogs = -typeNet(net, 'cost'), expense = -typeNet(net, 'expense');
     const gp = r2(revenue - cogs), op = r2(gp - expense);
-    const unclosed = r2(typeNet(netOpen, 'revenue') - typeNet(netOpen, 'cost') - typeNet(netOpen, 'expense'));
+    const unclosed = r2(typeNet(netOpen, 'revenue') + typeNet(netOpen, 'cost') + typeNet(netOpen, 'expense'));
     const closed = r2(-(DB.find('gl_account', '3131').balance || 0));
     const lockedN = DB.where('period', p => p.status === 'locked').length;
     const margin = revenue ? gp / revenue * 100 : 0, netMargin = revenue ? op / revenue * 100 : 0;
@@ -400,8 +400,9 @@ window.REPORTS = (function () {
   function close() {
     const ctx = periodCards();
     const { periods, stats, open, sel, retained, unclosed, carry, lockedCount, needClose } = ctx;
-    const asset = sumBal('asset'), liab = sumBal('liability'), eqOther = sumBal('equity');
-    const balanced = Math.abs(asset - liab - eqOther - retained - unclosed) < 0.05;
+    const asset = sumBal('asset'), liab = sumBal('liability'), equityAll = sumBal('equity');
+    /* equityAll 已含本年利润 3131(retained),再加未结转损益即为全部权益 */
+    const balanced = Math.abs(asset - liab - equityAll - unclosed) < 0.05;
     const cols = [
       { k: 'code', label: '会计期间', render: p => `<span class="mono cell-link cell-main" data-tb="${p.code}">${esc(p.code)}</span><div class="cell-sub">${dateCN(p.start)} 至 ${dateCN(p.end)}</div>` },
       { k: 'v', label: '凭证数', align: 'right', render: p => num(ACT.periodActivity(p.code).vouchers) },
@@ -424,6 +425,7 @@ window.REPORTS = (function () {
       debit: act[a.code].debit, credit: act[a.code].credit, net: r2(act[a.code].debit - act[a.code].credit) }));
     const tbDr = r2(tbRows.reduce((s, r) => s + r.debit, 0)), tbCr = r2(tbRows.reduce((s, r) => s + r.credit, 0));
     const built = ACT.buildCloseLines(sel);
+    const selP = periods.filter(p => p.code === sel)[0] || { status: 'open_period' };
     const canClose = ACT.PERM.can('period', 'approve');
 
     return head('close', `<button class="btn" data-route="journal">${icon('book')}记账凭证</button><button class="btn" data-route="reports/pl">${icon('grid')}利润表</button>`) + `
@@ -431,7 +433,7 @@ window.REPORTS = (function () {
         ${UI.kpi({ label: '待结账期间', value: num(needClose.length) + '<small> 个</small>', icon: 'clock', color: needClose.length ? '#DC2626' : '#0E7490', foot: `已锁定 ${lockedCount} 个 · 当前 ${esc(ctx.cur)} 月末结转` })}
         ${UI.kpi({ label: '未结转损益', value: '¥' + UI.compact(unclosed), icon: 'book', color: '#7C3AED', foot: carry ? `${carry} 个期间损益仍挂账上` : '全部已清零' })}
         ${UI.kpi({ label: '本年利润 3131', value: '¥' + UI.compact(retained), icon: 'wallet', color: '#047857', foot: '已结转期间累计' })}
-        ${UI.kpi({ label: '账账核对', value: balanced ? '平衡 ✓' : '不平 ✗', icon: 'check', color: balanced ? '#047857' : '#DC2626', foot: `资产 ${UI.compact(asset)} = 负债 ${UI.compact(liab)} + 权益 ${UI.compact(r2(eqOther + retained + unclosed))}` })}
+        ${UI.kpi({ label: '账账核对', value: balanced ? '平衡 ✓' : '不平 ✗', icon: 'check', color: balanced ? '#047857' : '#DC2626', foot: `资产 ${UI.compact(asset)} = 负债 ${UI.compact(liab)} + 权益 ${UI.compact(r2(equityAll + unclosed))}` })}
       </div>
       <div class="card mt16"><div class="card-head"><h3>${icon('grid')}会计期间与结账进度</h3>
         <div class="right"><span class="muted small">按月份顺序结转;锁定期间禁止任何过账</span></div></div>
@@ -461,8 +463,9 @@ window.REPORTS = (function () {
               <div>结转成本费用<b>¥${money(stats[sel] ? stats[sel].totalCost : 0)}</b></div>
               <div>净利润<b>¥${money(stats[sel] ? stats[sel].profit : 0)}</b></div></div>
             <div class="flex mt12" style="gap:8px">
-              <button class="btn primary grow" data-close-doc="${esc(sel)}"${canClose && sel === firstOpen() ? '' : ' disabled'}>${icon('lock')}结转 ${esc(sel)} 并锁定期间</button>
-              <button class="btn" data-reopen="${esc(sel)}"${canClose && sel === lockedTail() ? '' : ' disabled'}>${icon('unlock')}反结账</button>
+              ${selP.status === 'locked'
+                ? `<button class="btn" data-reopen="${esc(sel)}"${canClose && sel === lockedTail() ? '' : ' disabled title="请先反结账更晚的期间"'}>${icon('unlock')}反结账 ${esc(sel)}</button>`
+                : `<button class="btn primary grow" data-close-doc="${esc(sel)}"${canClose && sel === firstOpen() ? '' : ' disabled title="请先结转更早的期间;当前期间需月末结账"'}>${icon('lock')}结转 ${esc(sel)} 并锁定期间</button>`}
             </div>
             <div class="notice mt12">${icon('info')}<div><b>结账口径</b>①试算平衡 → ②按期间损益生成结转凭证(借收入类 / 贷本年利润 3131;借本年利润 / 贷成本与费用) → ③锁定期间。
               锁定后该月不可再过账、不可改库存,反结账需财务审批权限且必须倒序逐个回退。</div></div>

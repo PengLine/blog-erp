@@ -555,12 +555,31 @@ window.ACT = (function () {
   function save(entity, row, isNew) {
     const e = SCHEMA.entities[entity];
     const pk = e.pk;
+    if (entity === 'users' || entity === 'role') assertPerm('role', 'edit');
     if (isNew && !row[pk]) row[pk] = autoCode(entity);
     if (isNew && DB.find(entity, row[pk])) throw new Error(`${row[pk]} 已存在,请更换编码`);
+    if (entity === 'users') normalizeUser(row, isNew);
     if (e.nextSeqField && !row.status) row.status = 'draft';
     DB.upsert(entity, row);
     DB.log('基础数据', (isNew ? '新增' : '修改') + e.label, row[pk], row.name || '');
     return row;
+  }
+  /** 登录账号唯一 + 口令策略;编辑时留空口令表示沿用原口令 */
+  function normalizeUser(row, isNew) {
+    const acc = String(row.account || '').trim();
+    if (!acc) throw new Error('请填写登录账号,否则该用户无法进入系统');
+    if (!/^[A-Za-z][A-Za-z0-9._-]{2,19}$/.test(acc)) throw new Error(`登录账号「${acc}」不合规:需以字母开头,3-20 位字母、数字或 . _ -`);
+    const dup = DB.where('users', u => String(u.account || '').toLowerCase() === acc.toLowerCase() && u.code !== row.code)[0];
+    if (dup) throw new Error(`登录账号「${acc}」已被「${dup.name}(${dup.code})」占用`);
+    row.account = acc;
+    const pwd = String(row.pwd || '').trim();
+    if (!pwd) {
+      if (isNew) row.pwd = 'Sf@123456';
+      else delete row.pwd;
+      return;
+    }
+    if (pwd.length < 8 || !/[A-Za-z]/.test(pwd) || !/\d/.test(pwd)) throw new Error('登录口令至少 8 位,且需同时包含字母与数字');
+    row.pwd = pwd;
   }
   function autoCode(entity) {
     const map = { products: 'HM-', customers: 'CU-', suppliers: 'SU-', warehouses: 'WH-', processors: 'OS-', role: 'ROLE-' };

@@ -50,6 +50,7 @@ window.UI = (function () {
     filter: '<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
     lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v3"/>',
     unlock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+    zap: '<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5z"/>',
   };
   function icon(name, cls) {
     /* 默认 16px:内联 SVG 无宽高属性时浏览器会按 300x150 固有尺寸渲染,撑爆容器 */

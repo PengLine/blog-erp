@@ -4,6 +4,33 @@
 window.EXTRAS = (function () {
   const esc = UI.esc, num = UI.num, icon = UI.icon;
 
+  function securityCard() {
+    const s = DB.session() || {};
+    const u = DB.find('users', s.code) || {};
+    const role = DB.where('role', r => r.name === u.role)[0] || {};
+    const left = Math.max(0, Math.round(((s.expires || 0) - Date.now()) / 60000));
+    const logins = DB.where('activity', a => a.module === '系统安全').slice(0, 8);
+    return `<div class="card mt16"><div class="card-head"><h3>${icon('lock')}登录与安全</h3>
+      <div class="right"><button class="btn sm" data-action="pwd">${icon('edit')}修改我的口令</button></div></div>
+      <div class="card-body"><div class="grid g-2-1">
+        <div>${UI.descs([
+          ['当前账号', `<span class="mono">${esc(u.account || s.account || '—')}</span> · ${esc(u.name || '—')} · ${esc(u.dept || '—')}`],
+          ['角色 / 审批级别', `${esc(u.role || '—')}${role.level ? ' · L' + role.level : ''}${(role.level || 0) >= 9 ? ' · 超级权限' : ''}`],
+          ['本次登录', esc(new Date(s.at || Date.now()).toLocaleString('zh-CN'))],
+          ['会话剩余', `${num(left)} 分钟 · 闲置 ${DB.SESSION_HOURS} 小时自动登出`],
+          ['口令策略', '至少 8 位且含字母与数字;连续 5 次失败锁定 60 秒'],
+          ['在册账号', `${num(DB.count('users'))} 个(启用 ${num(DB.where('users', x => x.status === 'active').length)} · 停用 ${num(DB.where('users', x => x.status === 'inactive').length)})`],
+        ])}
+        <div class="notice mt12">${icon('info')}<div>纯静态演示系统:账号与口令保存在浏览器本地,不经过服务端,请勿用于真实数据。</div></div></div>
+        <div><div class="section-title">登录审计</div>
+        ${UI.table([
+          { k: 'time', label: '时间', render: r => `<span class="mono small">${esc(String(r.time).slice(5))}</span>` },
+          { k: 'action', label: '事件', render: r => `<span class="badge ${r.action === '登录失败' ? 'b-danger' : r.action === '登录成功' ? 'b-success' : 'b-neutral'}">${esc(r.action)}</span>` },
+          { k: 'ref', label: '账号', render: r => `<span class="mono small">${esc(r.ref || '—')}</span><div class="cell-sub">${esc(r.user)}</div>` },
+        ], logins, { pk: 'id', empty: '暂无登录审计记录' })}</div>
+      </div></div></div>`;
+  }
+
   function storageInfo() {
     let bytes = 0;
     try { bytes = new Blob([DB.exportJSON()]).size; } catch (e) { bytes = 0; }
@@ -33,6 +60,7 @@ window.EXTRAS = (function () {
           <div class="flex mt12"><button class="btn primary" data-action="saveMeta">${icon('check')}保存账套信息</button></div>
         </div></div>
       </div>
+      ${securityCard()}
       <div class="card mt16"><div class="card-head"><h3>${icon('copy')}备份与恢复</h3><div class="right"><span class="muted small">导出文件为 JSON,可用文本编辑器查看数据结构</span></div></div>
         <div class="card-body"><div class="grid g3">
           <div class="notice">${icon('download')}<div><b>导出备份</b><br>下载包含全部业务表与单据序号的 JSON 快照,可用于迁移到其他浏览器。</div><button class="btn sm mt8" data-action="export">导出 JSON</button></div></div>
@@ -88,8 +116,10 @@ window.EXTRAS = (function () {
       UI.toast('备份已导出');
     } else if (name === 'reset') {
       UI.confirm('将清空当前所有业务数据并重新生成演示数据,确定继续?', { danger: true, ok: '重置' }).then(y => {
-        if (!y) return; DB.reset(); APP.render(); UI.toast('演示数据已重新生成');
+        if (!y) return; DB.reset(); APP.showLogin('演示数据已重新生成,请重新登录');
       });
+    } else if (name === 'pwd') {
+      AUTH.pwdModal();
     } else if (name === 'saveMeta') {
       const fields = UI.$$('#set-form [data-k]').map(i => i.dataset.k);
       fields.forEach(k => DB.all().meta[k] = UI.$(`#set-form [data-k="${k}"]`).value);

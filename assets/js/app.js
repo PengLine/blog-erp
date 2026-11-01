@@ -77,10 +77,10 @@
   const state = { route: 'dashboard', collapsed: false };
 
   /* 路由 → 权限模块(导航按角色可见性过滤) */
-  const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role' };
+  const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role', users: 'role', gl_account: 'journal', approval: 'product_release' };
   SCHEMA.PERM_MODULES.forEach(m => { if (m.entity && !PERM_ROUTE[m.entity]) PERM_ROUTE[m.entity] = m.key; });
   function canSee(route) {
-    const mod = PERM_ROUTE[route];
+    const mod = route.indexOf('reports/') === 0 ? 'reports' : PERM_ROUTE[route];
     if (!mod) return true;
     try { return ACT.PERM.can(mod, 'view'); } catch (e) { return true; }
   }
@@ -93,12 +93,21 @@
     return SCHEMA.entities[route] ? route : '';
   }
   function render() {
+    if (!AUTH.check()) return showLogin();
+    document.getElementById('app').classList.remove('auth-out');
+    if (!canSee(state.route)) {
+      UI.toast(`当前角色「${(DB.session() || {}).role || '未分配'}」无权访问该页面,已返回经营看板`, 'warn');
+      state.route = 'dashboard';
+      location.hash = '#/dashboard';
+    }
     const { view, title } = resolve(state.route);
     const html = view(state.route);
     document.getElementById('view').innerHTML = html;
     document.title = title + ' · Sailfish ERP';
     paintNav();
     paintTopbar(title);
+    paintFoot();
+    AUTH.keepAlive();
     bindCommon();
     const ent = entityOf(state.route);
     if (ent) {
@@ -131,6 +140,31 @@
 
   function refresh(_, keepDrawer) {
     if (!keepDrawer) render(); else paintNav();
+  }
+
+  /* ---------------- 登录态 / 页脚 ---------------- */
+  function showLogin(msg) {
+    document.getElementById('app').classList.add('auth-out');
+    document.getElementById('sidebar').innerHTML = '';
+    document.getElementById('topbar').innerHTML = '';
+    document.getElementById('view').innerHTML = AUTH.page();
+    document.title = '登录 · Sailfish ERP';
+    AUTH.bind(document.getElementById('view'));
+    paintFoot();
+    if (msg) UI.toast(msg, 'warn');
+  }
+  function enter(route) {
+    document.getElementById('app').classList.remove('auth-out');
+    state.route = route || 'dashboard';
+    location.hash = '#/' + state.route;
+    render();
+  }
+  function paintFoot() {
+    const el = document.getElementById('app-foot');
+    if (!el) return;
+    el.innerHTML = `© 2026 <a href="https://pengline.cn/" target="_blank" rel="noopener">余一叶知秋尽</a>` +
+      `<span class="sep">|</span>Sailfish ERP 演示环境 · 数据仅保存在本机浏览器` +
+      `<span class="sep">|</span>种子版本 ${esc(DB.all().seedVersion || '—')}`;
   }
 
   function paintNav() {
@@ -191,7 +225,7 @@
     UI.$('[data-cmdk]').addEventListener('click', openCmdk);
     UI.$('[data-refresh]').addEventListener('click', () => { render(); UI.toast('数据已刷新'); });
     UI.$('[data-alerts]').addEventListener('click', () => { state.period = 30; go('todo'); });
-    UI.$('[data-user]').addEventListener('click', switchUser);
+    UI.$('[data-user]').addEventListener('click', () => AUTH.menu());
     UI.$$('#topbar [data-p]').forEach(b => b.addEventListener('click', () => {
       UI.$$('#topbar [data-p]').forEach(x => x.classList.remove('on')); b.classList.add('on');
       state.period = +b.dataset.p; render();
@@ -283,34 +317,20 @@
     setTimeout(() => input.focus(), 50);
   }
 
-  function switchUser() {
-    const users = DB.list('users');
-    UI.modal({ title: '切换当前登录用户', subtitle: '演示系统:角色影响待办视图与单据制单人',
-      body: `<div class="chips">${users.map(u => `<span class="chip ${u.name === DB.currentUser() ? 'on' : ''}" data-u="${esc(u.name)}">${esc(u.name)}<span class="n">${esc(u.role)}</span></span>`).join('')}</div>
-        <div class="notice mt16">${UI.icon('info')}<div>切换后新建单据的制单人/审核人记录会同步变更,用于演示岗位分离与审批流转。</div></div>`,
-      actions: [{ label: '关闭' }], width: 'mid' });
-    setTimeout(() => {
-      const box = UI.$$('.modal .chip');
-      box.forEach(c => c.addEventListener('click', () => {
-        DB.all().meta.currentUser = c.dataset.u; DB.persist();
-        UI.toast('已切换为 ' + c.dataset.u); UI.$('.mask').remove(); render();
-      }));
-    }, 30);
-  }
-
   function logoSVG() {
     return `<svg viewBox="0 0 32 32" fill="none"><rect width="32" height="32" rx="9" fill="url(#lg)"/><path d="M8 20.5c3.4 2.2 5.2-4.6 8.2-2.4 3 2.2 3.4-6 6.4-4" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><path d="M8 12.5c2.6 1.4 4.2-2 6.6-.6" stroke="#C7D2FE" stroke-width="1.8" stroke-linecap="round"/><defs><linearGradient id="lg" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#4F46E5"/><stop offset="1" stop-color="#7C3AED"/></linearGradient></defs></svg>`;
   }
 
   /* ---------------- 启动 ---------------- */
-  window.APP = { render, refresh, go, NAV, state, bindCommon, openCmdk, period: () => state.period || 30 };
+  window.APP = { render, refresh, go, NAV, state, bindCommon, openCmdk, logoSVG, showLogin, enter, paintFoot, period: () => state.period || 30 };
 
   function boot() {
     try { DB.init(); } catch (e) { console.error(e); alert('数据初始化失败:' + e.message); return; }
     const h = decodeURIComponent(location.hash || '').replace(/^#\//, '');
     state.route = (h && (SCHEMA.entities[h] || ['dashboard', 'todo', 'settings', 'guide'].includes(h) || isFlow(h) || h.indexOf('reports/') === 0)) ? h : 'dashboard';
-    render();
+    if (!AUTH.check()) { showLogin(); paintFoot(); } else render();
     window.addEventListener('hashchange', () => {
+      if (!AUTH.check()) return showLogin();
       const r = decodeURIComponent(location.hash || '').replace(/^#\//, '');
       if (r && r !== state.route) { state.route = r; render(); }
     });

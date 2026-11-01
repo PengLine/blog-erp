@@ -436,7 +436,7 @@ window.FLOW = (function () {
           { k: 'name', label: '姓名', sortable: false, render: r => `<span style="font-weight:550">${esc(r.name)}</span>${r.name === DB.currentUser() ? ' <span class="badge b-primary">当前</span>' : ''}` },
           { k: 'dept', label: '部门', sortable: false, render: r => esc(r.dept || '—') },
           { k: 'email', label: '邮箱', sortable: false, render: r => `<span class="muted small">${esc(r.email || '—')}</span>` },
-          { k: '_op', label: '', sortable: false, render: r => `<button class="btn sm ghost" data-perm-user="${esc(r.name)}">${icon('logout')}切为该用户</button>` },
+          { k: '_op', label: '', sortable: false, render: r => `<button class="btn sm ghost" data-perm-user="${esc(r.name)}" title="以 ${esc(r.account || r.code)} 登录演示">${icon('logout')}登录演示</button>` },
         ], users, { pk: 'code', empty: '该角色暂无用户' }) : `<div class="card-body">${UI.emptyBox('该角色暂无用户', '在用户档案里把角色名改为「' + esc(role.name) + '」即可')}</div>`}</div>
       <div class="card"><div class="card-head"><h3>${icon('clock')}最近授权变更</h3></div><div class="card-body">${permAudit()}</div></div>
     </div>`;
@@ -484,12 +484,11 @@ window.FLOW = (function () {
       const r = DB.find('role', sim.dataset.permSim);
       const u = DB.where('users', x => x.role === (r || {}).name)[0];
       if (!u) return UI.toast('该角色下暂无用户,请先在用户档案中指派', 'warn');
-      DB.all().meta.currentUser = u.name; DB.persist();
-      UI.toast('已切换为 ' + u.name + ' · ' + u.role); APP.refresh();
+      AUTH.switchTo(u.account || u.code, `演示角色「${u.role}」需要重新登录`);
     });
     $$('[data-perm-user]', root).forEach(b => b.addEventListener('click', () => {
-      DB.all().meta.currentUser = b.dataset.permUser; DB.persist();
-      UI.toast('已切换为 ' + b.dataset.permUser); APP.refresh();
+      const u = DB.find('users', b.dataset.permUser) || DB.where('users', x => x.name === b.dataset.permUser)[0] || {};
+      AUTH.switchTo(u.account || b.dataset.permUser, `切换用户「${b.dataset.permUser}」需要重新登录`);
     }));
   }
 

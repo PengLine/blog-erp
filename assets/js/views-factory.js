@@ -15,7 +15,7 @@ window.LIST = (function () {
     customers: ['code', 'name', 'type', 'region', 'credit_limit', 'salesperson', 'status'],
     suppliers: ['code', 'name', 'category', 'contact', 'phone', 'lead_time', 'rating', 'status'],
     warehouses: ['code', 'name', 'location', 'manager', 'area', 'status'],
-    users: ['code', 'name', 'dept', 'role', 'email', 'last_login', 'status'],
+    users: ['code', 'account', 'name', 'dept', 'role', 'email', 'last_login', 'status'],
     stock: ['product', 'product_name', 'warehouse', 'qty', 'reserved', 'available', 'cost', 'value', 'status'],
     stock_movements: ['no', 'date', 'type', 'product', 'product_name', 'warehouse', 'qty', 'amount', 'ref'],
     sales_order: ['no', 'date', 'customer_name', 'warehouse', 'required_date', 'salesperson', 'total', 'status'],
@@ -248,9 +248,14 @@ window.LIST = (function () {
     const row = isNew ? {} : DB.find(entity, id);
     /* 账簿派生数据(科目余额、会计期间)由凭证与结账动作维护,不提供手改入口 */
     if (e.readonly && !isNew && row) {
+      const show = (f, v) => f.t === 'select' ? UI.badge(v)
+        : f.t === 'money' ? UI.money(v)
+        : f.t === 'date' ? (v || '—')
+        : f.t === 'ref' ? (v || '—')
+        : esc(String(v === undefined || v === '' ? '—' : v));
       UI.modal({ title: e.label + ' · ' + row[e.pk], width: 'mid',
         body: `<div class="notice">${UI.icon('info')}<div><b>只读</b> ${esc(e.table)} 由凭证与期末结账自动维护,不提供手工编辑。</div></div>
-          ${UI.descs(Object.keys(e.fields).map(k => [e.fields[k].l, esc(String(row[k] === undefined ? '' : row[k]))]))}`,
+          ${UI.descs(Object.keys(e.fields).map(k => [e.fields[k].l, show(e.fields[k], row[k])]))}`,
         actions: [{ label: '关闭', onClick: () => { } }] });
       return;
     }

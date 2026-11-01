@@ -185,9 +185,11 @@ window.SCHEMA = (function () {
       fields: {
         code: { t: 'code', l: '工号', ph: 'EMP-' },
         name: { t: 'text', l: '姓名' },
+        account: { t: 'text', l: '登录账号', ph: '用于登录的账号名' },
         dept: { t: 'select', l: '部门', opts: { '总经办': 1, '销售部': 1, '采购部': 1, '仓储物流部': 1, '财务部': 1, '信息技术部': 1, '产品部': 1, '品质部': 1 } },
         role: { t: 'select', l: '角色', opts: { '系统管理员': 1, '销售主管': 1, '销售代表': 1, '采购主管': 1, '采购员': 1, '仓库管理员': 1, '财务会计': 1, '财务经理': 1, '产品经理': 1, '品质经理': 1 } },
         email: { t: 'email', l: '邮箱' },
+        pwd: { t: 'text', l: '登录口令', hide: true, ph: '留空则沿用原口令' },
         phone: { t: 'tel', l: '手机号', hide: true },
         last_login: { t: 'text', l: '最近登录', hide: true },
         status: { t: 'select', l: '状态', opts: { active: 1, inactive: 1 }, badge: 1 },

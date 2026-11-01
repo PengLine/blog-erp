@@ -3,7 +3,7 @@
  * ============================================================ */
 window.DB = (function () {
   const KEY = 'sailfish_erp_db_v1';
-  const SEED_VERSION = 'sfe-2026.11-J';
+  const SEED_VERSION = 'sfe-2026.11-K';
 
   let mem = null;               // { tables:{...}, seq:{...}, seedVersion, meta }
   let storageOK = true;
@@ -11,7 +11,7 @@ window.DB = (function () {
   function blank() {
     const tables = {};
     Object.keys(SCHEMA.entities).forEach(k => { tables[k] = []; });
-    return { tables, seq: {}, seedVersion: '', meta: { company: '赛福数字科技(杭州)有限公司', taxNo: '91330108MA2GTX8C4H' } };
+    return { tables, seq: {}, seedVersion: '', meta: { company: '赛福数字科技(杭州)有限公司', taxNo: '91330108MA2GTX8C4H', session: null, currentUser: '' } };
   }
   function persist() {
     if (!storageOK) return;
@@ -133,8 +133,36 @@ window.DB = (function () {
     persist();
   }
   function currentUser() {
-    if (!mem.meta.currentUser) mem.meta.currentUser = '陈立群';
-    return mem.meta.currentUser;
+    const s = mem.meta.session;
+    return s ? s.user : (mem.meta.currentUser || '系统');
+  }
+
+  /* ---------- 登录会话(演示环境:口令与会话都保存在本地) ---------- */
+  const SESSION_HOURS = 8;                 // 闲置超时时长
+  function session() {
+    const s = mem.meta.session;
+    if (!s) return null;
+    if (!s.expires || Date.now() > s.expires) { clearSession(); return null; }
+    return s;
+  }
+  function setSession(user, roleCode) {
+    const now = Date.now();
+    mem.meta.session = { user: user.name, code: user.code, account: user.account || user.code,
+      role: user.role, roleCode: roleCode || '', dept: user.dept || '', at: now, expires: now + SESSION_HOURS * 3600 * 1000 };
+    mem.meta.currentUser = user.name;
+    persist();
+    return mem.meta.session;
+  }
+  function touchSession() {
+    const s = mem.meta.session;
+    if (!s) return;
+    s.expires = Date.now() + SESSION_HOURS * 3600 * 1000;
+    persist();
+  }
+  function clearSession() {
+    mem.meta.session = null;
+    mem.meta.currentUser = '';
+    persist();
   }
 
   /* ---------- 生命周期 ---------- */
@@ -144,7 +172,6 @@ window.DB = (function () {
       mem = blank();
       SEED.build(mem, API);
       mem.seedVersion = SEED_VERSION;
-      mem.meta.currentUser = '陈立群';
       persist();
       console.info('[DB] 已生成演示数据 v' + SEED_VERSION);
     }
@@ -154,7 +181,6 @@ window.DB = (function () {
     try { localStorage.removeItem(KEY); } catch (e) { }
     SEED.build(mem, API);
     mem.seedVersion = SEED_VERSION;
-    mem.meta.currentUser = '陈立群';
     persist();
   }
   function exportJSON() { return JSON.stringify(mem, null, 2); }
@@ -174,7 +200,8 @@ window.DB = (function () {
   const API = {
     list, find, where, count, insert, upsert, update, remove,
     lines, setLines, nextNo, peekSeq, bumpSeq, all, stats, persist,
-    today, nowStr, addDays, monthOf, log, currentUser, init, reset, exportJSON, importJSON, pad
+    today, nowStr, addDays, monthOf, log, currentUser, init, reset, exportJSON, importJSON, pad,
+    session, setSession, touchSession, clearSession, SESSION_HOURS
   };
   return API;
 })();

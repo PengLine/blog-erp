@@ -75,8 +75,12 @@ window.SEED = (function () {
       ['EMP-1011', '苗泽宇', '信息技术部', '系统管理员'], ['EMP-1012', '章拾贰', '销售部', '销售代表'],
       ['EMP-1013', '温叙白', '产品部', '产品经理'], ['EMP-1014', '邵聿宁', '品质部', '品质经理'],
     ];
+    const DEMO_PWD = 'Sf@123456';            // 演示环境统一初始口令
+    const ADMIN_PWD = 'Sf@admin2026';        // 系统管理员口令
     USERS.forEach((u, i) => push('users', {
       code: u[0], name: u[1], dept: u[2], role: u[3],
+      account: i === 0 ? 'admin' : 'emp' + u[0].slice(4),
+      pwd: i === 0 ? ADMIN_PWD : DEMO_PWD,
       email: 'emp' + u[0].slice(4) + '@sailfish-erp.com', phone: '138' + String(50000000 + i * 137111).slice(0, 8),
       last_login: R.chance(.9) ? today : addDays(today, -3), status: i === 11 ? 'inactive' : 'active'
     }));
@@ -87,7 +91,7 @@ window.SEED = (function () {
       ['ROLE-01', '系统管理员', '总经办', 9, 'all', 0, [],
         '系统内置最高权限(级别 ≥9 直接放行),负责角色矩阵维护与系统参数。'],
       ['ROLE-02', '财务经理', '财务部', 8, 'all', 2000000,
-        perm(['dashboard', 'invoice', 'receipt', 'bill', 'payment', 'journal', 'gl_account', 'reports'], ['view', 'edit', 'approve'])
+        perm(['dashboard', 'invoice', 'receipt', 'bill', 'payment', 'journal', 'period', 'gl_account', 'reports'], ['view', 'edit', 'approve'])
           .concat(perm(['sales_order', 'purchase_order', 'purchase_req', 'rfq', 'product_release', 'supplier_apply', 'processors', 'processor_audit', 'os_order', 'rma', 'stock', 'products', 'customers', 'suppliers', 'activity', 'role'], ['view'])),
         '全盘财务口径:开票/收付款/凭证可审可改,业务模块只读监督。'],
       ['ROLE-03', '销售主管', '销售部', 6, 'dept', 500000,
@@ -129,6 +133,16 @@ window.SEED = (function () {
       perms: r[6].slice().sort(), users: T.users.filter(u => u.role === r[1]).length,
       status: 'enabled', note: r[7]
     }));
+
+    /* ---------- 登录审计:内置最近的认证痕迹(固定内容,不占用随机序列) ---------- */
+    [['陈立群', 'admin', 8, 12, 1], ['方静姝', 'emp1002', 8, 41, 1], ['郑思远', 'emp1006', 9, 6, 1],
+     ['章拾贰', 'emp1012', 9, 33, 0], ['何砚舟', 'emp1008', 9, 58, 1], ['钱雅诃', 'emp1010', 10, 21, 1]]
+      .forEach((x, i) => T.activity.push({
+        id: 'LA' + (90000 + i), user: x[0], module: '系统安全', action: x[4] ? '登录成功' : '登录失败',
+        ref: x[1], time: api.nowStr().slice(0, 11) + api.pad(x[2], 2) + ':' + api.pad(x[3], 2) + ':' + api.pad((x[2] * 7 + x[3]) % 60, 2),
+        detail: x[4] ? `账号 ${x[1]} 口令校验通过,已建立本地会话(闲置 8 小时自动过期)`
+          : `账号 ${x[1]} 口令校验失败,来源为本机浏览器;连续 5 次失败将锁定 60 秒`
+      }));
 
     /* ---------- 仓库 ---------- */
     const WHS = [
