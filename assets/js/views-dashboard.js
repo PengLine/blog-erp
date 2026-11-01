@@ -136,7 +136,7 @@ window.DASH = (function () {
     <div class="grid g2 mt16">
       <div class="card"><div class="card-head"><h3>${icon('clipboard')}我的待办</h3><div class="right"><button class="btn sm" data-route="todo">全部 ${todos.length} 项</button></div></div><div class="card-body">${todoHTML}</div></div>
       <div class="card"><div class="card-head"><h3>${icon('layers')}模块数据量</h3></div><div class="card-body">
-        <div class="grid g3">${Object.entries({ 商品: 'products', 客户: 'customers', 供应商: 'suppliers', 销售订单: 'sales_order', 'PO': 'purchase_order', 库存行: 'stock', 流水: 'stock_movements', 凭证: 'journal', 日志: 'activity' })
+        <div class="grid g3">${Object.entries({ 商品: 'products', 客户: 'customers', 供应商: 'suppliers', 销售订单: 'sales_order', 'PO': 'purchase_order', 库存行: 'stock', 流水: 'stock_movements', 凭证: 'journal', 询价单: 'rfq', 委外加工: 'os_order', 售后工单: 'rma', 审批单: 'approval', 日志: 'activity' })
           .map(([l, k]) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;cursor:pointer" data-route="${k}">
             <div class="muted small">${l}</div><div style="font-size:18px;font-weight:650" class="money">${num(DB.count(k))}</div></div>`).join('')}</div></div></div>
     </div>`;
@@ -160,7 +160,24 @@ window.DASH = (function () {
     const low = DB.where('stock', s => s.status !== 'normal').length;
     const trDraft = DB.where('transfer', t => t.status === 'draft').length;
     const stDraft = DB.where('stocktake', t => t.status === 'draft').length;
+    /* 新增模块:审批中心 / 产品管理 / 服务商管理 / 售后管理 */
+    const apPend = DB.where('approval', a => a.status === 'pending' && a.module !== 'so_change').length;
+    const chgPend = DB.where('approval', a => a.status === 'pending' && a.module === 'so_change').length;
+    const rfqDraft = DB.where('rfq', r => r.status === 'draft').length;
+    const rfqSent = DB.where('rfq', r => r.status === 'sent').length;
+    const rfqQuote = DB.where('rfq', r => r.status === 'quoted').length;
+    const relPend = DB.where('product_release', r => r.status === 'pending').length;
+    const relAppr = DB.where('product_release', r => r.status === 'approved').length;
+    const supPend = DB.where('supplier_apply', a => ['pending', 'inspecting'].indexOf(a.status) >= 0).length;
+    const auditPend = DB.where('processor_audit', a => ['pending', 'inspecting'].indexOf(a.status) >= 0).length;
+    const osIssue = DB.where('os_order', o => o.status === 'confirmed').length;
+    const osRecv = DB.where('os_order', o => o.status === 'issued' || o.status === 'received').length;
+    const rmaPend = DB.where('rma', r => r.status === 'pending').length;
+    const rmaDo = DB.where('rma', r => ['approved', 'received', 'repairing'].indexOf(r.status) >= 0).length;
+    const rmaRed = DB.where('rma', r => r.status === 'received' && !r.credit_invoice).length;
+    add('待办审批', apPend, '跨模块审批队列,岗位分离后回写业务单据状态', 'approvals', '去审批', 'b-danger');
     add('待审核销售订单', drafts, '草稿订单需审核后才会占用库存并允许发货', 'sales_order', '去审核', 'b-neutral');
+    add('订单变更申请', chgPend, '交期与优先级变更需销售主管确认,通过后回写订单', 'approvals', '去裁决', 'b-warning');
     add('待发货销售订单', wait, '已审核订单需创建出库单完成发货', 'sales_order', '去发货', 'b-primary');
     add('部分出库订单', part, '仍有未发完的行,需跟进剩余数量', 'sales_order', '跟进', 'b-warning');
     add('待审批采购申请', prPend, '等待采购主管审批,可一键转采购订单', 'purchase_req', '去审批', 'b-warning');
@@ -171,6 +188,18 @@ window.DASH = (function () {
     add('待收款发票', openInv, '到期未过 30 天的正常应收', 'invoice', '登记收款', 'b-warning');
     add('逾期未付账单', overdueBill, '可能影响供应商信用,请安排付款', 'bill', '去付款', 'b-danger');
     add('待付账单', openBill, '正常账期内的应付', 'bill', '安排付款', 'b-info');
+    add('待发出询价', rfqDraft, '草稿询价单需邀请供应商报价', 'rfq', '去发单', 'b-neutral');
+    add('待回收报价', rfqSent, '已发出的询价单还没有回填最低价', 'rfq', '录报价', 'b-info');
+    add('待定标询价', rfqQuote, '比价完成,定标后按供应商拆分生成采购订单', 'rfq', '去定标', 'b-purple');
+    add('待审核新品', relPend, '新品发布单需销售主管裁决毛利与渠道', 'product_release', '去审核', 'b-warning');
+    add('待上架新品', relAppr, '已核准的新品需建档并生成商品主档', 'product_release', '去上架', 'b-success');
+    add('待审批供应商准入', supPend, '准入申请与现场审核结论需采购主管核准', 'supplier_apply', '去审批', 'b-warning');
+    add('待裁决外协商审核', auditPend, '品质经理已录入评分,等待采购主管核准入池', 'processor_audit', '去审核', 'b-info');
+    add('委外待发料', osIssue, '加工单需发出材料,借委托加工物资 1408', 'os_order', '去发料', 'b-primary');
+    add('委外在制待收回', osRecv, '已发料加工单需收回成品并结算加工费', 'os_order', '去收回', 'b-warning');
+    add('待裁决售后工单', rmaPend, '退货/换货/维修需销售主管审批后才能处理', 'rma', '去审批', 'b-warning');
+    add('售后待处理', rmaDo, '通过审批的工单需入库、红冲或退款', 'rma', '去处理', 'b-info');
+    add('售后待红冲', rmaRed, '退货已入库但未开红字发票,应收无法冲减', 'invoice', '开红字', 'b-purple');
     add('库存预警 SKU', low, '低于安全库存或缺货,建议补货', 'stock', '查看', 'b-warning');
     add('草稿调拨单', trDraft, '调拨单需过账才会产生库存流水', 'transfer', '去过账', 'b-neutral');
     add('未过账盘点单', stDraft, '录入实盘数量后过账生成盘盈盘亏', 'stocktake', '去盘点', 'b-info');

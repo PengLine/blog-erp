@@ -5,29 +5,44 @@
   const NAV = [
     { group: '工作台', items: [
       { id: 'dashboard', label: '经营看板', icon: 'dashboard' },
+      { id: 'approvals', label: '审批中心', icon: 'check' },
+      { id: 'orders', label: '订单中心', icon: 'truck' },
       { id: 'todo', label: '待办任务', icon: 'clipboard' },
     ] },
-    { group: '基础数据', items: [
+    { group: '产品管理', items: [
+      { id: 'rfq', label: '询价 / 比价', icon: 'search' },
+      { id: 'product_release', label: '新品发布', icon: 'trendUp' },
+      { id: 'approval', label: '审核单据', icon: 'check' },
+    ] },
+    { group: '商品管理', items: [
       { id: 'products', label: '商品 / 物料', icon: 'box' },
       { id: 'customers', label: '客户档案', icon: 'users' },
-      { id: 'suppliers', label: '供应商档案', icon: 'truck' },
-      { id: 'warehouses', label: '仓库与库位', icon: 'home' },
-      { id: 'users', label: '用户与权限', icon: 'user' },
     ] },
-    { group: '销售管理', items: [
+    { group: '订单管理', items: [
       { id: 'sales_order', label: '销售订单', icon: 'file' },
       { id: 'delivery', label: '销售出库单', icon: 'send' },
       { id: 'invoice', label: '销售发票 / 应收', icon: 'receipt' },
       { id: 'receipt', label: '收款单', icon: 'wallet' },
     ] },
+    { group: '售后管理', items: [
+      { id: 'rma', label: '售后工单', icon: 'refresh' },
+    ] },
     { group: '采购管理', items: [
       { id: 'purchase_req', label: '采购申请', icon: 'clipboard' },
+      { id: 'supplier_apply', label: '供应商准入申请', icon: 'user' },
+      { id: 'suppliers', label: '供应商档案', icon: 'truck' },
       { id: 'purchase_order', label: '采购订单', icon: 'file' },
       { id: 'gr', label: '采购收货单', icon: 'download' },
       { id: 'bill', label: '采购账单 / 应付', icon: 'receipt' },
       { id: 'payment', label: '付款单', icon: 'card' },
     ] },
+    { group: '服务商管理', items: [
+      { id: 'processors', label: '服务商 / 外协厂', icon: 'copy' },
+      { id: 'processor_audit', label: '外协商审核', icon: 'clipboard' },
+      { id: 'os_order', label: '委外加工单', icon: 'swap' },
+    ] },
     { group: '库存管理', items: [
+      { id: 'warehouses', label: '仓库与库位', icon: 'home' },
       { id: 'stock', label: '库存现量', icon: 'layers' },
       { id: 'stock_movements', label: '出入库流水', icon: 'swap' },
       { id: 'transfer', label: '库存调拨', icon: 'swap' },
@@ -45,6 +60,11 @@
       { id: 'reports/inventory', label: '库存与周转', icon: 'pie' },
       { id: 'reports/pl', label: '利润表', icon: 'grid' },
     ] },
+    { group: '权限管理', items: [
+      { id: 'perms', label: '权限矩阵', icon: 'grid' },
+      { id: 'role', label: '角色定义', icon: 'settings' },
+      { id: 'users', label: '用户档案', icon: 'user' },
+    ] },
     { group: '系统', items: [
       { id: 'activity', label: '操作日志', icon: 'clock' },
       { id: 'reports/dashboard2', label: '自定义报表', icon: 'filter' },
@@ -54,6 +74,16 @@
   ];
 
   const state = { route: 'dashboard', collapsed: false };
+
+  /* 路由 → 权限模块(导航按角色可见性过滤) */
+  const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role' };
+  SCHEMA.PERM_MODULES.forEach(m => { if (m.entity && !PERM_ROUTE[m.entity]) PERM_ROUTE[m.entity] = m.key; });
+  function canSee(route) {
+    const mod = PERM_ROUTE[route];
+    if (!mod) return true;
+    try { return ACT.PERM.can(mod, 'view'); } catch (e) { return true; }
+  }
+  function isFlow(route) { return FLOW.routes.indexOf(route) >= 0; }
 
   /* ---------------- 渲染 ---------------- */
   /** 路由归一:侧边栏与全局搜索使用裸实体名,深链兼容 entity: 前缀 */
@@ -72,6 +102,8 @@
     const ent = entityOf(state.route);
     if (ent) {
       LIST.bind(document.getElementById('view'), ent);
+    } else if (isFlow(state.route)) {
+      FLOW.bind[state.route] && FLOW.bind[state.route](document.getElementById('view'));
     } else if (REPORTS.bind[state.route]) {
       REPORTS.bind[state.route](document.getElementById('view'));
     } else if (state.route === 'dashboard' || state.route === 'todo') {
@@ -86,6 +118,7 @@
       const key = route.slice(8);
       return { view: () => REPORTS.render(key), title: (REPORTS.TITLES[key] || '报表') };
     }
+    if (isFlow(route)) return { view: () => FLOW[route](), title: FLOW.titles[route] };
     if (route === 'dashboard') return { view: () => DASH.board(), title: '经营看板' };
     if (route === 'todo') return { view: () => DASH.todo(), title: '待办任务' };
     if (route === 'settings') return { view: () => EXTRAS.settings(), title: '系统设置' };
@@ -101,27 +134,33 @@
 
   function paintNav() {
     const ent = entityOf(state.route);
+    const pendAp = DB.where('approval', a => a.status === 'pending').length;
     document.getElementById('sidebar').innerHTML = `
       <div class="logo">${logoSVG()}<div class="logo-text"><b>Sailfish ERP</b><i>Enterprise Resource Planning</i></div></div>
-      <nav class="nav">${NAV.map(g => `<div class="nav-group-title">${g.group}</div>
-        ${g.items.map(it => {
-          const route = it.id.indexOf('/') > 0 ? 'reports/' + it.id.split('/')[1] : it.id;
+      <nav class="nav">${NAV.map(g => {
+        const items = g.items.filter(it => canSee(routeOf(it)));
+        if (!items.length) return '';
+        return `<div class="nav-group-title">${g.group}</div>
+        ${items.map(it => {
+          const route = routeOf(it);
           const isEnt = SCHEMA.entities[route];
           const active = state.route === route || (isEnt && ent === route);
-          const cnt = isEnt ? countBadge(route) : null;
+          const cnt = isEnt ? countBadge(route) : (route === 'approvals' ? pendAp : null);
           return `<div class="nav-item ${active ? 'active' : ''}" data-route="${route}" title="${it.label}">${UI.icon(it.icon)}<span class="nav-label">${it.label}</span>${cnt ? `<span class="cnt">${cnt}</span>` : ''}</div>`;
-        }).join('')}`).join('')}
+        }).join('')}`;
+      }).join('')}
       </nav>
       <div class="side-foot">${UI.icon('database')}
         <div class="side-user-name">${esc(DB.all().meta.company.slice(0, 6))}…<span>账套 2026 · 本地存储</span></div></div>`;
     UI.$$('#sidebar [data-route]').forEach(el => el.addEventListener('click', () => go(el.dataset.route)));
   }
+  function routeOf(it) { return it.id.indexOf('/') > 0 ? 'reports/' + it.id.split('/')[1] : it.id; }
   function countBadge(route) {
     if (route === 'activity') return null;
     const e = SCHEMA.entities[route];
     if (!e) return null;
     if (e.statusField) {
-      const open = DB.where(route, r => ['draft', 'confirmed', 'pending', 'open', 'partial', 'overdue'].indexOf(r[e.statusField]) >= 0).length;
+      const open = DB.where(route, r => ['draft', 'confirmed', 'pending', 'open', 'partial', 'overdue', 'sent', 'quoted', 'inspecting', 'issued', 'received', 'approved', 'repairing'].indexOf(r[e.statusField]) >= 0).length;
       return open || null;
     }
     if (route === 'stock') { const low = DB.where('stock', s => s.status !== 'normal').length; return low || null; }
@@ -131,10 +170,12 @@
 
   function paintTopbar(title) {
     const alerts = alertCount();
-    const crumb = NAV.map(g => ({ group: g.group, items: g.items })).reduce((acc, g) => {
-      const it = g.items.find(i => (i.id.indexOf('/') > 0 ? 'reports/' + i.id.split('/')[1] : i.id) === state.route);
+    const crumb = NAV.reduce((acc, g) => {
+      const it = g.items.find(i => routeOf(i) === state.route);
       return it ? `<span class="crumb">${g.group} / <b>${it.label}</b></span>` : acc;
     }, `<span class="crumb"><b>${esc(title)}</b></span>`);
+    const role = ACT.PERM.currentRole();
+    const me = DB.where('users', u => u.name === DB.currentUser())[0] || {};
     document.getElementById('topbar').innerHTML = `${crumb}
       <div class="topbar-right">
         <div class="searchbox" data-cmdk>${UI.icon('search')}<span>搜索单据、客户、商品…</span><kbd>Ctrl K</kbd></div>
@@ -143,7 +184,7 @@
         <button class="icon-btn" data-refresh title="刷新数据">${UI.icon('refresh')}</button>
         <div class="flex" style="gap:9px;padding-left:6px;border-left:1px solid var(--border);cursor:pointer" data-user>
           <div class="avatar">${esc(initials(DB.currentUser()))}</div>
-          <div style="line-height:1.25" class="hide-sm"><b style="font-size:12.5px">${esc(DB.currentUser())}</b><div class="muted" style="font-size:11px">系统管理员 · 陈立群团队</div></div>
+          <div style="line-height:1.25" class="hide-sm"><b style="font-size:12.5px">${esc(DB.currentUser())}</b><div class="muted" style="font-size:11px">${esc((role || {}).name || me.role || '未分配角色')}${role ? ' · 级别 ' + role.level : ''}</div></div>
         </div>
       </div>`;
     UI.$('[data-cmdk]').addEventListener('click', openCmdk);
@@ -157,10 +198,14 @@
   }
   function initials(n) { return n ? n.slice(0, 2) : 'ER'; }
   function alertCount() {
-    return DB.where('sales_order', o => o.status === 'confirmed').length +
+    return DB.where('approval', a => a.status === 'pending').length +
+      DB.where('sales_order', o => o.status === 'confirmed').length +
       DB.where('purchase_req', p => p.status === 'pending').length +
       DB.where('invoice', i => i.status === 'overdue').length +
-      DB.where('stock', s => s.status !== 'normal').length;
+      DB.where('stock', s => s.status !== 'normal').length +
+      DB.where('rfq', r => r.status === 'sent').length +
+      DB.where('os_order', o => o.status === 'issued').length +
+      DB.where('rma', r => ['pending', 'approved', 'received'].indexOf(r.status) >= 0).length;
   }
 
   function bindCommon() {
@@ -204,9 +249,16 @@
       }));
       if (q) {
         const add = (entity, rows, pickField, subFn, icon) => rows.slice(0, 5).forEach(r => items.push({
-          kind: SCHEMA.entities[entity].label, icon, title: r[pickField], sub: subFn(r), go: () => DOC.open(entity, r[SCHEMA.entities[entity].pk]) }));
+          kind: SCHEMA.entities[entity].label, icon, title: r[pickField], sub: subFn(r), go: () => LIST.openDoc(entity, r[SCHEMA.entities[entity].pk]) }));
         add('sales_order', DB.where('sales_order', o => (o.no + o.customer_name).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.customer_name} · ¥${UI.money(o.total)}`, 'file');
         add('purchase_order', DB.where('purchase_order', o => (o.no + o.supplier_name).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.supplier_name} · ¥${UI.money(o.total)}`, 'file');
+        add('rfq', DB.where('rfq', o => (o.no + o.title + o.buyer).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.title} · 最低报价 ¥${UI.money(o.amount)}`, 'search');
+        add('product_release', DB.where('product_release', o => (o.no + o.name + o.owner).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.name} · 拟售价 ¥${UI.money(o.target_price)}`, 'trendUp');
+        add('os_order', DB.where('os_order', o => (o.no + o.processor_name + o.output_name).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.processor_name} · ${o.output_name}`, 'swap');
+        add('rma', DB.where('rma', o => (o.no + o.customer_name + o.so).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.customer_name} · ${SCHEMA.entities.rma.fields.type.opts[o.type] || o.type}`, 'refresh');
+        add('approval', DB.where('approval', o => (o.no + o.title + o.biz).toLowerCase().indexOf(q) >= 0), 'no', o => `${SCHEMA.entities.approval.fields.module.opts[o.module] || o.module} · ${o.biz}`, 'check');
+        add('supplier_apply', DB.where('supplier_apply', o => (o.no + o.company).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.company} · ${o.status}`, 'user');
+        add('processors', DB.where('processors', o => (o.code + o.name).toLowerCase().indexOf(q) >= 0), 'name', o => `${o.code} · ${SCHEMA.entities.processors.fields.process_type.opts[o.process_type] || ''}`, 'copy');
         add('invoice', DB.where('invoice', o => (o.no + o.customer_name).toLowerCase().indexOf(q) >= 0), 'no', o => `未收 ¥${UI.money(o.balance)}`, 'receipt');
         add('bill', DB.where('bill', o => (o.no + o.supplier_name).toLowerCase().indexOf(q) >= 0), 'no', o => `未付 ¥${UI.money(o.balance)}`, 'receipt');
         add('customers', DB.where('customers', c => (c.code + c.name).toLowerCase().indexOf(q) >= 0), 'name', c => c.code + ' · ' + c.region, 'users');
@@ -255,7 +307,7 @@
   function boot() {
     try { DB.init(); } catch (e) { console.error(e); alert('数据初始化失败:' + e.message); return; }
     const h = decodeURIComponent(location.hash || '').replace(/^#\//, '');
-    state.route = (h && (SCHEMA.entities[h] || ['dashboard', 'todo', 'settings', 'guide'].includes(h) || h.indexOf('reports/') === 0)) ? h : 'dashboard';
+    state.route = (h && (SCHEMA.entities[h] || ['dashboard', 'todo', 'settings', 'guide'].includes(h) || isFlow(h) || h.indexOf('reports/') === 0)) ? h : 'dashboard';
     render();
     window.addEventListener('hashchange', () => {
       const r = decodeURIComponent(location.hash || '').replace(/^#\//, '');

@@ -37,7 +37,7 @@ button{font-family:inherit}
 .sidebar{width:246px;flex:0 0 246px;background:var(--sidebar);color:#C7CFE3;display:flex;flex-direction:column;overflow:hidden}
 .main{flex:1;min-width:0;display:flex;flex-direction:column}
 .view{flex:1;overflow-y:auto;padding:22px 26px 60px}
-@media (max-width:1080px){.sidebar{width:72px;flex-basis:72px}.sidebar .logo-text,.sidebar .nav-label,.sidebar .nav-group-title,.sidebar .nav-caret,.sidebar .side-user-name span{display:none}.sidebar .nav-item{justify-content:center}}
+@media (max-width:1080px){.sidebar{width:72px;flex-basis:72px}.sidebar .logo-text,.sidebar .nav-label,.sidebar .nav-group-title,.sidebar .nav-caret,.sidebar .side-user-name{display:none}.sidebar .nav-item{justify-content:center}.sidebar .side-foot{justify-content:center;padding:12px 0}}
 
 /* Sidebar */
 .logo{display:flex;align-items:center;gap:10px;padding:18px 18px 16px;color:#fff}
@@ -55,6 +55,7 @@ button{font-family:inherit}
 .nav-item .cnt{margin-left:auto;font-size:11px;background:rgba(255,255,255,.14);border-radius:999px;padding:1px 7px;color:#DDE4F4}
 .nav-item.active .cnt{background:rgba(255,255,255,.25)}
 .side-foot{border-top:1px solid #212C48;padding:12px 14px;display:flex;align-items:center;gap:10px}
+.side-foot svg{width:16px;height:16px;flex:0 0 16px;opacity:.8}
 .side-user-name{font-size:12.5px;color:#D7DEEE;line-height:1.3}
 .side-user-name span{display:block;font-size:11px;color:#6C7894}
 .avatar{width:32px;height:32px;border-radius:9px;background:linear-gradient(135deg,#4F46E5,#7C3AED);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:600;flex:0 0 32px}
@@ -66,8 +67,10 @@ button{font-family:inherit}
 .topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px}
 .searchbox{display:flex;align-items:center;gap:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:9px;padding:7px 11px;width:280px;color:var(--text-3);cursor:text;font-size:13px}
 .searchbox:hover{border-color:var(--border-strong)}
+.searchbox svg{width:15px;height:15px;flex:0 0 15px}
 .searchbox kbd{margin-left:auto;font-family:inherit;font-size:11px;border:1px solid var(--border-strong);border-radius:5px;padding:0 5px;color:var(--text-3);background:#fff}
 .icon-btn{width:34px;height:34px;border-radius:9px;border:1px solid var(--border);background:var(--surface);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-2);position:relative}
+.icon-btn svg{width:17px;height:17px}
 .icon-btn:hover{background:var(--surface-2);color:var(--text)}
 .icon-btn .dot{position:absolute;top:6px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--danger);border:2px solid var(--surface)}
 

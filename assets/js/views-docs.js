@@ -106,6 +106,148 @@ window.DOC = (function () {
     receipt: { table: '收款单', pk: 'no', docTable: null, steps: ['posted'], stepLabels: { posted: '已过账' }, stepState() { return { posted: 1 }; }, actions() { return []; } },
     journal: { table: '记账凭证', pk: 'no', docTable: 'journal_lines', isJournal: true, steps: ['posted'], stepLabels: { posted: '已过账' }, stepState() { return { posted: 1 }; }, actions() { return [{ l: '打印凭证', icon: 'print', run: 'print' }]; } },
     stock_movements: { table: '出入库流水', pk: 'no', docTable: null, steps: [], stepLabels: {}, stepState() { return {}; }, actions() { return []; } },
+
+    /* ---------------- 产品管理:询价 / 发布 / 审批 ---------------- */
+    rfq: {
+      table: '询价单', pk: 'no', docTable: 'rfq_lines',
+      steps: ['draft', 'sent', 'quoted', 'awarded'],
+      stepLabels: { draft: '编制询价', sent: '发出邀请', quoted: '回收报价', awarded: '定标转采购' },
+      stepState(o) {
+        const lvl = { draft: 0, sent: 1, quoted: 2, awarded: 3, closed: 3 }[o.status] || 0;
+        return { draft: 1, sent: lvl >= 1 ? 1 : 0, quoted: lvl >= 2 ? 1 : 0, awarded: lvl >= 3 ? 1 : 0 };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '发出询价', cls: 'primary', icon: 'send', run: 'rfqSend' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (o.status === 'sent') a.push({ l: '录入供应商报价', cls: 'primary', icon: 'edit', run: 'rfqQuote' }, { l: '关闭', cls: 'danger-ghost', icon: 'close', run: 'rfqClose' });
+        if (o.status === 'quoted') a.push({ l: '定标生成采购订单', cls: 'primary', icon: 'check', run: 'rfqAward' }, { l: '修改报价', icon: 'edit', run: 'rfqQuote' }, { l: '关闭', cls: 'danger-ghost', icon: 'close', run: 'rfqClose' });
+        if (o.status === 'awarded') a.push({ l: '查看成交采购单', icon: 'file', run: 'rfqPO' });
+        a.push({ l: '打印比价表', icon: 'print', run: 'print' });
+        return a;
+      }
+    },
+    product_release: {
+      table: '新品发布单', pk: 'no', docTable: null,
+      steps: ['draft', 'pending', 'approved', 'published'],
+      stepLabels: { draft: '立项编制', pending: '产品评审', approved: '审批通过', published: '建档上架' },
+      stepState(o) {
+        const lvl = { draft: 0, pending: 1, rejected: 1, approved: 2, published: 3, off_shelf: 3 }[o.status] || 0;
+        return { draft: 1, pending: lvl >= 1 ? 1 : 0, approved: lvl >= 2 ? 1 : 0, published: lvl >= 3 ? 1 : 0 };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '提交评审', cls: 'primary', icon: 'send', run: 'relSubmit' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (o.status === 'pending') a.push({ l: '评审通过', cls: 'success', icon: 'check', run: 'relApprove' }, { l: '驳回', cls: 'danger-ghost', icon: 'close', run: 'relReject' });
+        if (o.status === 'approved') a.push({ l: '建档并上架', cls: 'primary', icon: 'upload', run: 'relPublish' });
+        if (o.status === 'published') a.push({ l: '查看商品主档', icon: 'eye', run: 'relProduct' }, { l: '下架', cls: 'danger-ghost', icon: 'close', run: 'relOff' });
+        if (o.status === 'rejected') a.push({ l: '修改后重报', icon: 'edit', run: 'edit' });
+        return a;
+      }
+    },
+    approval: {
+      table: '审批单', pk: 'no', docTable: null, steps: ['pending', 'done'],
+      stepLabels: { pending: '待办审批', done: '已裁决' },
+      stepState(o) { return { pending: o.status === 'pending' ? 1 : 0, done: o.status === 'pending' ? 0 : 1 }; },
+      actions(o) {
+        const a = [];
+        if (o.status === 'pending') a.push({ l: '同意', cls: 'success', icon: 'check', run: 'apApprove' }, { l: '驳回', cls: 'danger-ghost', icon: 'close', run: 'apReject' });
+        if (o.biz) a.push({ l: '查看业务单据', icon: 'eye', run: 'apJump' });
+        return a;
+      }
+    },
+
+    /* ---------------- 服务商管理:准入 / 外协商审核 / 委外 ---------------- */
+    supplier_apply: {
+      table: '供应商准入申请', pk: 'no', docTable: null,
+      steps: ['draft', 'pending', 'inspecting', 'approved', 'archived'],
+      stepLabels: { draft: '提交申请', pending: '资格初审', inspecting: '现场审核', approved: '评审核准', archived: '生成档案' },
+      stepState(o) {
+        const lvl = { draft: 0, rejected: 1, pending: 1, inspecting: 2, approved: 3, archived: 4 }[o.status] || 0;
+        return { draft: 1, pending: lvl >= 1 ? 1 : 0, inspecting: lvl >= 2 ? 1 : 0, approved: lvl >= 3 ? 1 : 0, archived: lvl >= 4 ? 1 : 0 };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '提交准入评审', cls: 'primary', icon: 'send', run: 'saSubmit' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (o.status === 'pending') a.push({ l: '登记现场审核', cls: 'primary', icon: 'edit', run: 'saInspect' });
+        if (['pending', 'inspecting'].includes(o.status)) a.push({ l: '评审通过', cls: 'success', icon: 'check', run: 'saApprove' }, { l: '否决', cls: 'danger-ghost', icon: 'close', run: 'saReject' });
+        if (o.status === 'approved') a.push({ l: '生成供应商档案', cls: 'primary', icon: 'truck', run: 'saArchive' });
+        if (o.status === 'archived') a.push({ l: '查看供应商', icon: 'eye', run: 'saSupplier' });
+        return a;
+      }
+    },
+    processor_audit: {
+      table: '外协商审核单', pk: 'no', docTable: null,
+      steps: ['draft', 'pending', 'inspecting', 'approved'],
+      stepLabels: { draft: '编制审核', pending: '提交审核', inspecting: '打样与评分', approved: '核准发布' },
+      stepState(o) {
+        const lvl = { draft: 0, rejected: 1, pending: 1, inspecting: 2, approved: 3 }[o.status] || 0;
+        return { draft: 1, pending: lvl >= 1 ? 1 : 0, inspecting: lvl >= 2 ? 1 : 0, approved: lvl >= 3 ? 1 : 0 };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '提交审核', cls: 'primary', icon: 'send', run: 'paSubmit' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (['pending', 'inspecting'].includes(o.status)) a.push({ l: '打样评分', cls: 'primary', icon: 'edit', run: 'paScore' });
+        if (['pending', 'inspecting'].includes(o.status)) a.push({ l: '核准合作', cls: 'success', icon: 'check', run: 'paApprove' }, { l: '淘汰', cls: 'danger-ghost', icon: 'close', run: 'paReject' });
+        if (o.status === 'approved') a.push({ l: '查看服务商', icon: 'eye', run: 'paProcessor' }, { l: '发起委外', icon: 'swap', run: 'paToOS' });
+        a.push({ l: '打印审核表', icon: 'print', run: 'print' });
+        return a;
+      }
+    },
+    os_order: {
+      table: '委外加工单', pk: 'no', docTable: 'os_lines',
+      steps: ['draft', 'confirmed', 'issued', 'received', 'done'],
+      stepLabels: { draft: '编制加工单', confirmed: '下发服务商', issued: '发料过账', received: '收回成品', done: '加工完成' },
+      stepState(o) {
+        return {
+          draft: 1,
+          confirmed: o.status !== 'draft' && o.status !== 'cancelled' ? 1 : 0,
+          issued: (o.issued_amount || 0) > 0 ? 1 : 0,
+          received: (o.received_qty || 0) > 0 ? 1 : 0,
+          done: o.status === 'done' ? 1 : 0
+        };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '审核下发', cls: 'primary', icon: 'check', run: 'osConfirm' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (['confirmed', 'issued', 'received'].includes(o.status) && (o.output_qty || 0) > (o.received_qty || 0)) a.push({ l: '委外发料', cls: 'primary', icon: 'send', run: 'osIssue' });
+        if ((o.issued_amount || 0) > 0 && (o.output_qty || 0) > (o.received_qty || 0)) a.push({ l: '收回成品', cls: 'success', icon: 'download', run: 'osReceive' });
+        if (['draft', 'confirmed'].includes(o.status)) a.push({ l: '取消', cls: 'danger-ghost', icon: 'close', run: 'osCancel' });
+        if (o.status === 'done') a.push({ l: '查看加工费账单', icon: 'receipt', run: 'osBill' });
+        a.push({ l: '打印加工单', icon: 'print', run: 'print' });
+        return a;
+      }
+    },
+
+    /* ---------------- 售后管理 ---------------- */
+    rma: {
+      table: '售后工单', pk: 'no', docTable: 'rma_lines',
+      steps: ['draft', 'pending', 'approved', 'received', 'settled'],
+      stepLabels: { draft: '受理客诉', pending: '售后审批', approved: '审批通过', received: '退货入库', settled: '退款/换货' },
+      stepState(o) {
+        return {
+          draft: 1,
+          pending: o.status !== 'draft' ? 1 : 0,
+          approved: ['approved', 'received', 'refunded', 'exchanged', 'repairing', 'closed'].includes(o.status) ? 1 : 0,
+          received: ['received', 'refunded', 'exchanged', 'closed', 'repairing'].includes(o.status) ? 1 : 0,
+          settled: ['refunded', 'exchanged', 'closed'].includes(o.status) ? 1 : 0
+        };
+      },
+      actions(o) {
+        const a = [];
+        if (o.status === 'draft') a.push({ l: '提交审批', cls: 'primary', icon: 'send', run: 'rmaSubmit' }, { l: '编辑', icon: 'edit', run: 'edit' }, { l: '删除', cls: 'danger-ghost', icon: 'trash', run: 'delete' });
+        if (o.status === 'pending') a.push({ l: '同意处理', cls: 'success', icon: 'check', run: 'rmaApprove' }, { l: '驳回', cls: 'danger-ghost', icon: 'close', run: 'rmaReject' });
+        if (o.status === 'approved') {
+          if (o.type === 'repair') a.push({ l: '登记维修费用', cls: 'primary', icon: 'wallet', run: 'rmaRepair' });
+          else a.push({ l: '退货入库', cls: 'primary', icon: 'download', run: 'rmaReceive' });
+        }
+        if (o.status === 'received' && !o.credit_invoice) a.push({ l: '开红字发票', cls: 'primary', icon: 'receipt', run: 'rmaCredit' });
+        if (o.status === 'received' && o.credit_invoice) a.push({ l: '登记退款', cls: 'primary', icon: 'wallet', run: 'rmaRefund' });
+        if (['refunded', 'exchanged', 'repairing'].includes(o.status)) a.push({ l: '关闭工单', cls: 'success', icon: 'check', run: 'rmaClose' });
+        if (o.credit_invoice) a.push({ l: '查看红字发票', icon: 'eye', run: 'rmaInvoice' });
+        a.push({ l: '打印工单', icon: 'print', run: 'print' });
+        return a;
+      }
+    },
   };
 
   /* ---------------- 打开单据 ---------------- */
@@ -119,7 +261,11 @@ window.DOC = (function () {
       head: `<div><div class="flex" style="gap:10px"><h3 style="font-size:17px" class="mono">${esc(no)}</h3>${badge(row.status)}</div>
              <div class="muted small" style="margin-top:3px">${esc(cfg.table)} · ${esc(e.table)}</div></div>`,
       body: `<div id="doc-body">${docBody(entity, row)}</div>`,
-      foot: cfg.actions(row).map((a, i) => `<button class="btn ${a.cls || ''}" data-doc-act="${i}">${icon(a.icon || 'eye')}${esc(a.l)}</button>`).join('') + `<div class="right"><button class="btn" data-close>关闭</button></div>`
+      foot: cfg.actions(row).map((a, i) => {
+        const need = ACT_PERM[a.run] || 'view';
+        const allow = need === 'view' || ACT.PERM.can(entity, need);
+        return `<button class="btn ${a.cls || ''}" data-doc-act="${i}"${allow ? '' : ` disabled title="当前角色无${SCHEMA.entities[entity].label}的${need === 'approve' ? '审批' : '执行'}权限"`}>${icon(a.icon || 'eye')}${esc(a.l)}</button>`;
+      }).join('') + `<div class="right"><button class="btn" data-close>关闭</button></div>`
     });
     bindDoc(d, entity, no, cfg);
   }
@@ -179,8 +325,16 @@ window.DOC = (function () {
     if (f.t === 'ref') return UI.cellRef(f.ref, row[key]);
     if (f.t === 'money') return `<span class="money">¥${money(row[key])}</span>`;
     if (f.t === 'int') return num(row[key]);
+    if (f.t === 'percent') { const v = +row[key] || 0; return (v <= 1 ? v * 100 : v).toFixed(1) + '%'; }
     if (f.t === 'date') return dateCN(row[key]);
-    if (f.t === 'select') return f.badge || SCHEMA.STATUS[row[key]] ? UI.badge(row[key]) : (f.opts && (typeof f.opts[row[key]] === 'object' ? (SCHEMA.STATUS[row[key]] || {}).l : f.opts[row[key]])) || row[key];
+    if (f.t === 'datetime') return esc(row[key] || '');
+    if (f.t === 'select') {
+      const v = row[key];
+      if (f.badge) return UI.badge(v);
+      const o = f.opts && (typeof f.opts === 'function' ? f.opts() : f.opts)[v];
+      if (o === undefined || o === null || o === 1 || o === true || typeof o === 'object') return esc((SCHEMA.STATUS[v] || {}).l || v || '');
+      return esc(o);
+    }
     return esc(row[key] || '');
   }
 
@@ -195,12 +349,28 @@ window.DOC = (function () {
       </div></div></div>`;
   }
 
+  /* 各明细子表的列定义(缺省走通用物料行) */
+  const DOC_COLS = {
+    rfq_lines: [{ k: 'lineno', label: '#' }, { k: 'product', label: '物料编码' }, { k: 'product_name', label: '商品名称' },
+      { k: 'supplier', label: '报价供应商', ref: 'suppliers' }, { k: 'qty', label: '询价数量', right: 1 },
+      { k: 'base_price', label: '目标成本', right: 1 }, { k: 'price', label: '报价单价', right: 1 },
+      { k: 'amount', label: '报价金额', right: 1 }, { k: 'lead_time', label: '交付(天)', right: 1 },
+      { k: 'awarded', label: '定标', render: v => v === 'y' ? '<span class="badge b-purple">中标</span>' : '<span class="muted small">—</span>' }],
+    os_lines: [{ k: 'lineno', label: '#' }, { k: 'product', label: '发料物料' }, { k: 'product_name', label: '物料名称' },
+      { k: 'qty', label: '计划发料', right: 1 }, { k: 'issued', label: '已发料', right: 1 },
+      { k: 'price', label: '单位成本', right: 1 }, { k: 'amount', label: '材料金额', right: 1 }, { k: 'memo', label: '用途' }],
+    rma_lines: [{ k: 'lineno', label: '#' }, { k: 'product', label: '物料编码' }, { k: 'product_name', label: '商品名称' },
+      { k: 'qty', label: '数量', right: 1 }, { k: 'price', label: '原单价', right: 1 }, { k: 'tax_rate', label: '税率', right: 1 },
+      { k: 'amount', label: '金额', right: 1 }, { k: 'memo', label: '问题描述' }],
+  };
+  const NUM_KEYS = ['qty', 'lineno', 'book_qty', 'actual_qty', 'diff', 'delivered', 'received', 'issued', 'returned', 'lead_time'];
+
   function linesCard(entity, row, cfg) {
     const lines = cfg.isJournal ? DB.list('journal_lines').filter(l => l.doc === row.no) : DB.lines(cfg.docTable, row.no);
     if (!lines.length) return '';
     const cols = cfg.isJournal
       ? [{ k: 'account', label: '科目' }, { k: 'account_name', label: '科目名称' }, { k: 'memo', label: '摘要' }, { k: 'debit', label: '借方', right: 1 }, { k: 'credit', label: '贷方', right: 1 }]
-      : (cfg.docTable === 'stk_lines'
+      : DOC_COLS[cfg.docTable] || (cfg.docTable === 'stk_lines'
         ? [{ k: 'product', label: '编码' }, { k: 'product_name', label: '商品' }, { k: 'book_qty', label: '账面', right: 1 }, { k: 'actual_qty', label: '实盘', right: 1 }, { k: 'diff', label: '差异', right: 1 }, { k: 'cost', label: '单位成本', right: 1 }, { k: 'diff_amount', label: '差异金额', right: 1 }]
         : [{ k: 'lineno', label: '#' }, { k: 'product', label: '物料编码' }, { k: 'product_name', label: '商品名称' }, { k: 'qty', label: '数量', right: 1 }]
           .concat(cfg.docTable === 'so_lines' ? [{ k: 'delivered', label: '已出库', right: 1 }] : [])
@@ -212,12 +382,21 @@ window.DOC = (function () {
       <div class="table-wrap"><table class="tbl"><thead><tr>${cols.map(c => `<th class="${c.right ? 'right' : ''}">${esc(c.label)}</th>`).join('')}</tr></thead>
       <tbody>${lines.map(l => `<tr>${cols.map(c => {
         const v = l[c.k];
-        if (c.right) return `<td class="right money">${c.k === 'tax_rate' ? (v || 0) + '%' : c.k === 'discount' ? (v ? (v * 100).toFixed(0) + '%' : '—') : c.k === 'qty' || c.k === 'lineno' || c.k === 'book_qty' || c.k === 'actual_qty' || c.k === 'diff' || c.k === 'delivered' || c.k === 'received' ? num(v) : money(v)}</td>`;
+        if (c.render) return `<td class="${c.right ? 'right' : ''}">${c.render(v, l)}</td>`;
+        if (c.right) return `<td class="right money">${c.k === 'tax_rate' ? (v || 0) + '%' : c.k === 'discount' ? (v ? (v * 100).toFixed(0) + '%' : '—') : NUM_KEYS.indexOf(c.k) >= 0 ? num(v) : money(v)}</td>`;
+        if (c.ref) return `<td>${UI.cellRef(c.ref, v)}</td>`;
         if (c.k === 'product') return `<td class="mono">${UI.cellRef('products', v)}</td>`;
         return `<td>${esc(v === undefined || v === null ? '' : v)}</td>`;
       }).join('')}</tr>`).join('')}</tbody></table></div>
       ${sumKeys.length ? `<div class="lines-sum">${sumKeys.map(c => { const s = lines.reduce((x, l) => x + (+l[c.k] || 0), 0); return `<span>${esc(c.label)} <b>¥${money(s)}</b></span>`; }).join('')}</div>` : ''}</div>`;
   }
+
+  /* 审批单 module → 业务实体 */
+  const BIZ_ENTITY = {
+    product_release: 'product_release', supplier_apply: 'supplier_apply', processor_audit: 'processor_audit',
+    purchase_req: 'purchase_req', rma: 'rma', os_order: 'os_order', so_change: 'sales_order',
+    price_change: 'products', stock_adjust: 'stocktake'
+  };
 
   function related(entity, row) {
     const out = [];
@@ -244,12 +423,43 @@ window.DOC = (function () {
       receipt: [{ title: '核销发票', entity: 'invoice', rows: row.invoice ? [DB.find('invoice', row.invoice)].filter(Boolean) : [], label: i => `余额 ¥${money(i.balance)}` }],
       payment: [{ title: '核销账单', entity: 'bill', rows: row.bill ? [DB.find('bill', row.bill)].filter(Boolean) : [], label: b => `余额 ¥${money(b.balance)}` }],
       stock_movements: [],
+      rfq: [
+        { title: '定标生成的采购订单', entity: 'purchase_order', rows: DB.where('purchase_order', p => p.rfq === row[pk]), label: p => `${p.supplier_name} · ¥${money(p.total)}` },
+      ],
+      product_release: [
+        { title: '审批单', entity: 'approval', rows: row.approval ? [DB.find('approval', row.approval)].filter(Boolean) : [], label: a => `${a.title} · ${a.approver || '待审批'}` },
+        { title: '生成的商品主档', entity: 'products', rows: row.product ? [DB.find('products', row.product)].filter(Boolean) : [], label: p => `售价 ¥${money(p.price)} · 状态 ${p.status}` },
+      ],
+      approval: [
+        { title: '业务单据', entity: BIZ_ENTITY[row.module] || '', rows: row.biz && BIZ_ENTITY[row.module] ? [DB.find(BIZ_ENTITY[row.module], row.biz)].filter(Boolean) : [], label: r => r.title || r.reason || r.name || r.memo || row.title },
+      ],
+      supplier_apply: [
+        { title: '准入审批单', entity: 'approval', rows: row.approval ? [DB.find('approval', row.approval)].filter(Boolean) : [], label: a => `${a.approver || '待审批'} · ${a.opinion || ''}` },
+        { title: '生成的供应商档案', entity: 'suppliers', rows: row.supplier ? [DB.find('suppliers', row.supplier)].filter(Boolean) : [], label: s => `评分 ${s.rating} · ${s.payment_terms}` },
+      ],
+      processor_audit: [
+        { title: '审批单', entity: 'approval', rows: row.approval ? [DB.find('approval', row.approval)].filter(Boolean) : [], label: a => `${a.approver || '待审批'} · ${a.opinion || ''}` },
+        { title: '关联委外单', entity: 'os_order', rows: DB.where('os_order', o => o.processor === row.processor), label: o => `${o.processor_name} · ${o.received_qty || 0}/${o.output_qty} 件` },
+      ],
+      os_order: [
+        { title: '加工费账单', entity: 'bill', rows: DB.where('bill', b => b.os === row[pk]), label: b => `应付 ¥${money(b.total)} · 未付 ¥${money(b.balance)}` },
+        { title: '付款记录', entity: 'payment', rows: DB.where('payment', p => DB.where('bill', b => b.os === row[pk]).some(b => b.no === p.bill)), label: p => `${p.method} ¥${money(p.amount)}` },
+        { title: '委外出入库流水', entity: 'stock_movements', rows: DB.where('stock_movements', m => m.ref === row[pk]), label: m => `${SCHEMA.entities.stock_movements.fields.type.opts[m.type] || m.type} ${m.product_name} ${m.qty}` },
+      ],
+      rma: [
+        { title: '审批单', entity: 'approval', rows: row.approval ? [DB.find('approval', row.approval)].filter(Boolean) : [], label: a => `${a.approver || '待审批'} · ${a.opinion || ''}` },
+        { title: '红字发票', entity: 'invoice', rows: row.credit_invoice ? [DB.find('invoice', row.credit_invoice)].filter(Boolean) : [], label: i => `冲减应收 ¥${money(-i.balance)}` },
+        { title: '退款单', entity: 'receipt', rows: DB.where('receipt', r => r.invoice === row.credit_invoice), label: r => `${r.method} ¥${money(-r.amount)}` },
+        { title: '来源订单', entity: 'sales_order', rows: row.so ? [DB.find('sales_order', row.so)].filter(Boolean) : [], label: o => `订单 ¥${money(o.total)}` },
+        { title: '售后出入库流水', entity: 'stock_movements', rows: DB.where('stock_movements', m => m.ref === row[pk]), label: m => `${SCHEMA.entities.stock_movements.fields.type.opts[m.type] || m.type} ${m.product_name} ${m.qty}` },
+      ],
     };
     (map[entity] || []).forEach(g => { if (g.rows && g.rows.length) out.push({ title: g.title, entity: g.entity, rows: g.rows, label: g.label }); });
     if (entity === 'journal') {
       const j = DB.find('journal', row.no);
       if (j && j.ref) {
-        const tgt = [['sales_invoice', 'invoice'], ['sales_receipt', 'receipt'], ['sales_delivery', 'delivery'], ['ap_bill', 'bill'], ['ap_payment', 'payment'], ['stock_adjust', 'stocktake']]
+        const tgt = [['sales_invoice', 'invoice'], ['sales_receipt', 'receipt'], ['sales_delivery', 'delivery'], ['ap_bill', 'bill'], ['ap_payment', 'payment'], ['stock_adjust', 'stocktake'],
+          ['os_issue', 'os_order'], ['os_receive', 'os_order'], ['rma_return', 'rma'], ['rma_credit', 'invoice'], ['rma_refund', 'receipt'], ['rma_repair', 'rma']]
           .find(t => t[0] === j.type);
         if (tgt && DB.find(tgt[1], j.ref)) out.push({ title: '原始单据', entity: tgt[1], rows: [DB.find(tgt[1], j.ref)], label: () => '点击查看原始业务单据' });
       }
@@ -279,9 +489,28 @@ window.DOC = (function () {
     d.el.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', ev => { ev.stopPropagation(); const [e2, id] = el.dataset.open.split('='); open(e2, decodeURIComponent(id)); }));
   }
 
+  /* 动作所需权限(缺省 view;审批类=approve,写操作类=edit) */
+  const ACT_PERM = {
+    confirm: 'approve', reopen: 'approve', approve: 'approve', reject: 'approve', toPO: 'approve', delete: 'edit', edit: 'edit',
+    deliver: 'edit', receive: 'edit', invoice: 'edit', pay: 'edit', receipt: 'edit', toBill: 'edit', submit: 'edit',
+    postTransfer: 'edit', count: 'edit', cancel: 'edit',
+    rfqSend: 'edit', rfqQuote: 'edit', rfqAward: 'approve', rfqClose: 'edit',
+    relSubmit: 'edit', relApprove: 'approve', relReject: 'approve', relPublish: 'edit', relOff: 'edit',
+    apApprove: 'approve', apReject: 'approve',
+    saSubmit: 'edit', saInspect: 'edit', saApprove: 'approve', saReject: 'approve', saArchive: 'edit',
+    paSubmit: 'edit', paScore: 'edit', paApprove: 'approve', paReject: 'approve', paToOS: 'edit',
+    osConfirm: 'approve', osIssue: 'edit', osReceive: 'edit', osCancel: 'edit',
+    rmaSubmit: 'edit', rmaApprove: 'approve', rmaReject: 'approve', rmaReceive: 'edit', rmaCredit: 'edit', rmaRefund: 'edit', rmaRepair: 'edit', rmaClose: 'edit',
+  };
+
   function run(action, entity, no, rerender, d) {
     const wrap = fn => { try { fn(); } catch (e) { UI.toast(e.message || '操作失败', 'err'); return; } };
     const row = DB.find(entity, no);
+    const need = ACT_PERM[action] || 'view';
+    if (need !== 'view' && !ACT.PERM.can(entity, need)) {
+      UI.toast(`当前用户「${DB.currentUser()}」的角色无${SCHEMA.entities[entity].label}的${need === 'approve' ? '审批' : '执行'}权限`, 'err');
+      return;
+    }
     switch (action) {
       case 'confirm': wrap(() => { const r = entity === 'sales_order' ? ACT.confirmSO(no) : ACT.confirmPO(no); if (r && r.shortage) UI.toast(`已审核,但 ${r.shortage} 行库存不足`, 'warn'); else UI.toast('审核通过,单据已生效'); }); rerender(); break;
       case 'cancel': UI.confirm(`确认取消单据 <b class="mono">${esc(no)}</b>?取消后库存占用将被释放。`, { danger: true, ok: '确认取消' }).then(yes => { if (!yes) return; wrap(() => entity === 'sales_order' ? ACT.cancelSO(no) : ACT.cancelPO(no)); UI.toast('单据已取消'); rerender(); }); break;
@@ -306,6 +535,64 @@ window.DOC = (function () {
         row.status = 'done'; row.user = DB.currentUser(); DB.upsert('transfer', row); DB.log('库存管理', '过账库存调拨单', no, `${lines.length} 行`); UI.toast('调拨已过账');
       }); rerender(); break;
       case 'count': openStocktake(no, rerender, d); break;
+
+      /* ---------------- 询价比价 ---------------- */
+      case 'rfqSend': wrap(() => { const n = ACT.sendRFQ(no); UI.toast(`已发出询价,生成 ${n} 行待报价`); }); rerender(); break;
+      case 'rfqQuote': openRFQQuote(no, rerender); break;
+      case 'rfqAward': UI.confirm(`确认按 <b>最低报价</b> 定标并生成采购订单?<br><span class="muted small">同一供应商的物料会合并为一张草稿采购单,需再次审核后下发。</span>`, { ok: '确认定标' }).then(yes => {
+        if (!yes) return;
+        wrap(() => { const list = ACT.awardRFQ(no); UI.toast('已生成采购订单 ' + list.join('、')); d.close(); open('purchase_order', list[0]); });
+      }); break;
+      case 'rfqClose': wrap(() => { ACT.closeRFQ(no); UI.toast('询价单已关闭'); }); rerender(); break;
+      case 'rfqPO': { const first = (row.ref_po || '').split(' / ')[0]; if (first) { d.close(); open('purchase_order', first); } break; }
+
+      /* ---------------- 新品发布 ---------------- */
+      case 'relSubmit': wrap(() => { ACT.submitRelease(no); UI.toast('已提交产品评审,进入审批中心'); }); rerender(); break;
+      case 'relApprove': openOpinion('新品评审 · ' + no, true, txt => { wrap(() => { ACT.decideRelease(no, true, txt); UI.toast('评审通过,可建档上架'); }); rerender(); }); break;
+      case 'relReject': openOpinion('新品评审 · ' + no, false, txt => { wrap(() => { ACT.decideRelease(no, false, txt); UI.toast('已驳回'); }); rerender(); }); break;
+      case 'relPublish': wrap(() => { const code = ACT.publishRelease(no); UI.toast('商品建档并上架:' + code); d.close(); APP.refresh(); open('products', code); }); break;
+      case 'relOff': wrap(() => { ACT.offShelfRelease(no); UI.toast('商品已下架'); }); rerender(); break;
+      case 'relProduct': if (row.product) { d.close(); open('products', row.product); } break;
+
+      /* ---------------- 审批中心 ---------------- */
+      case 'apApprove': openOpinion('审批 · ' + no, true, txt => { wrap(() => { ACT.decideApproval(no, true, txt); UI.toast('审批通过,业务单据已联动'); }); rerender(); }); break;
+      case 'apReject': openOpinion('审批 · ' + no, false, txt => { wrap(() => { ACT.decideApproval(no, false, txt); UI.toast('已驳回'); }); rerender(); }); break;
+      case 'apJump': { const ent = BIZ_ENTITY[row.module]; if (ent) { d.close(); open(ent, row.biz); } break; }
+
+      /* ---------------- 供应商准入 ---------------- */
+      case 'saSubmit': wrap(() => { ACT.submitApply(no); UI.toast('已提交准入评审'); }); rerender(); break;
+      case 'saInspect': openScoreModal('supplier_apply', no, rerender); break;
+      case 'saApprove': openOpinion('准入评审 · ' + no, true, txt => { wrap(() => { ACT.decideApply(no, true, txt); UI.toast('评审通过,可生成供应商档案'); }); rerender(); }); break;
+      case 'saReject': openOpinion('准入评审 · ' + no, false, txt => { wrap(() => { ACT.decideApply(no, false, txt); UI.toast('已否决'); }); rerender(); }); break;
+      case 'saArchive': wrap(() => { const code = ACT.archiveApply(no); UI.toast('供应商建档完成:' + code); d.close(); APP.refresh(); open('suppliers', code); }); break;
+      case 'saSupplier': if (row.supplier) { d.close(); open('suppliers', row.supplier); } break;
+
+      /* ---------------- 外协商审核 ---------------- */
+      case 'paSubmit': wrap(() => { ACT.submitAudit(no); UI.toast('已提交外协商审核'); }); rerender(); break;
+      case 'paScore': openScoreModal('processor_audit', no, rerender); break;
+      case 'paApprove': openOpinion('外协商核准 · ' + no, true, txt => { wrap(() => { ACT.decideAudit(no, true, txt); UI.toast('已核准,服务商资质与费率已更新'); }); rerender(); }); break;
+      case 'paReject': openOpinion('外协商核准 · ' + no, false, txt => { wrap(() => { ACT.decideAudit(no, false, txt); UI.toast('已淘汰'); }); rerender(); }); break;
+      case 'paProcessor': if (row.processor) { d.close(); open('processors', row.processor); } break;
+      case 'paToOS': d.close(); newDoc('os_order', { processor: row.processor, processor_name: row.processor_name, process_type: row.process_type, unit_fee: row.unit_rate }); break;
+
+      /* ---------------- 委外加工 ---------------- */
+      case 'osConfirm': wrap(() => { ACT.confirmOS(no); UI.toast('加工单已下发服务商'); }); rerender(); break;
+      case 'osIssue': openIssueModal(no, rerender); break;
+      case 'osReceive': openReceiveModal(no, rerender); break;
+      case 'osCancel': UI.confirm(`确认取消委外加工单 <b class="mono">${esc(no)}</b>?`, { danger: true, ok: '确认取消' }).then(yes => { if (!yes) return; wrap(() => ACT.cancelOS(no)); UI.toast('加工单已取消'); rerender(); }); break;
+      case 'osBill': if (row.bill) { d.close(); open('bill', row.bill); } break;
+
+      /* ---------------- 售后管理 ---------------- */
+      case 'rmaSubmit': wrap(() => { ACT.submitRMA(no); UI.toast('已提交售后审批'); }); rerender(); break;
+      case 'rmaApprove': openOpinion('售后审批 · ' + no, true, txt => { wrap(() => { ACT.decideRMA(no, true, txt); UI.toast('已同意处理'); }); rerender(); }); break;
+      case 'rmaReject': openOpinion('售后审批 · ' + no, false, txt => { wrap(() => { ACT.decideRMA(no, false, txt); UI.toast('工单已驳回'); }); rerender(); }); break;
+      case 'rmaReceive': wrap(() => { const c = ACT.receiveRMA(no); UI.toast(`退货入库过账,冲回成本 ¥${money(c)}`); }); rerender(); break;
+      case 'rmaCredit': UI.confirm(`确认开具红字发票并冲减收入与应收?`, { ok: '确认开票' }).then(yes => { if (!yes) return; wrap(() => { const iv = ACT.creditRMA(no); UI.toast('红字发票 ' + iv); d.close(); open('invoice', iv); }); }); break;
+      case 'rmaRefund': openRefundModal(no, rerender); break;
+      case 'rmaRepair': openRepairModal(no, rerender); break;
+      case 'rmaClose': wrap(() => { ACT.closeRMA(no); UI.toast('售后工单已关闭'); }); rerender(); break;
+      case 'rmaInvoice': if (row.credit_invoice) { d.close(); open('invoice', row.credit_invoice); } break;
+
       case 'print': printDoc(entity, no); break;
       default: UI.toast('暂不支持的操作: ' + action, 'warn');
     }
@@ -389,6 +676,197 @@ window.DOC = (function () {
       } }] });
   }
 
+  /* ---------------- 新品/准入/审核:意见弹窗 ---------------- */
+  function openOpinion(title, ok, done) {
+    const fields = [{ k: 'opinion', label: ok ? '审批意见' : '驳回原因', type: 'textarea', required: !ok, full: true, def: ok ? '同意,按流程执行' : '', ph: ok ? '' : '请说明驳回原因,便于发起人补充资料' }];
+    UI.modal({
+      title: ok ? '审批通过' : '审批驳回', subtitle: title, body: UI.form(fields, {}),
+      actions: [{ label: '取消' }, { label: ok ? '确认通过' : '确认驳回', cls: ok ? 'primary' : 'danger-ghost', icon: ok ? 'check' : 'close',
+        onClick: m => { const rd = UI.readForm(m.el, fields); if (!rd.ok) { UI.toast('请填写' + fields[0].label, 'err'); return false; } done(rd.values.opinion); } }]
+    });
+  }
+
+  /* ---------------- 询价:供应商报价录入 ---------------- */
+  function openRFQQuote(no, rerender) {
+    const lines = DB.lines('rfq_lines', no);
+    const groups = {};
+    lines.forEach(l => { (groups[l.product] = groups[l.product] || []).push(l); });
+    const body = Object.keys(groups).map(code => {
+      const p = DB.find('products', code) || {};
+      const rows = groups[code];
+      return `<div class="section-title">${icon('box')} ${esc(p.name || code)} <span class="muted small mono"> ${esc(code)} · 询价数量 ${num(rows[0].qty)}</span></div>
+        <div class="table-wrap"><table class="lines-tbl"><thead><tr><th>报价供应商</th><th style="width:120px" class="right">目标成本</th><th style="width:140px" class="right">报价单价(未税)</th><th style="width:110px" class="right">交付(天)</th><th style="width:130px" class="right">报价金额</th></tr></thead><tbody>
+        ${rows.map(l => `<tr data-l="${l.lineno}" data-g="${esc(code)}"><td>${esc(l.supplier_name)}<div class="cell-sub mono">${esc(l.supplier)}</div></td>
+          <td class="right money">¥${money(l.base_price)}</td>
+          <td class="right"><input type="number" step="0.01" min="0" data-f="price" value="${l.price || ''}" placeholder="0.00" class="num right"></td>
+          <td class="right"><input type="number" min="1" data-f="lead_time" value="${l.lead_time || 14}" class="num right"></td>
+          <td class="right money" data-amt>¥${money(l.amount)}</td></tr>`).join('')}</tbody></table></div>`;
+    }).join('');
+    const m = UI.modal({
+      title: '录入供应商报价', subtitle: `${no} · 每个物料至少一家有效报价`, width: 'wide',
+      body: body + `<div class="notice mt12">${icon('info')}<div>报价为<b>未税单价</b>。定标时同一物料自动取<b>最低报价</b>供应商,并按供应商合并生成草稿采购订单。</div></div>`,
+      actions: [{ label: '取消' }, { label: '保存报价', cls: 'primary', icon: 'check', onClick: mm => {
+        const quotes = UI.$$('[data-l]', mm.el).map(tr => ({
+          lineno: tr.dataset.l, price: +($('[data-f="price"]', tr) || { value: 0 }).value || 0,
+          lead_time: +($('[data-f="lead_time"]', tr) || { value: 0 }).value || 0
+        }));
+        try { const amt = ACT.saveRFQQuotes(no, quotes); UI.toast(`报价已登记,最低报价合计 ¥${money(amt)}`); rerender(); }
+        catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+    function repaint() {
+      const byGroup = {};
+      UI.$$('[data-l]', m.el).forEach(tr => {
+        const price = +($('[data-f="price"]', tr) || { value: 0 }).value || 0;
+        const qty = +(DB.lines('rfq_lines', no).find(l => String(l.lineno) === tr.dataset.l) || { qty: 0 }).qty;
+        $('[data-amt]', tr).textContent = '¥' + money(price * qty);
+        (byGroup[tr.dataset.g] = byGroup[tr.dataset.g] || []).push({ tr, price });
+      });
+      Object.keys(byGroup).forEach(g => {
+        const valid = byGroup[g].filter(x => x.price > 0);
+        const min = valid.length ? Math.min.apply(null, valid.map(x => x.price)) : null;
+        byGroup[g].forEach(x => {
+          const best = min !== null && x.price === min && x.price > 0;
+          x.tr.style.background = best ? 'var(--primary-50)' : '';
+          x.tr.dataset.best = best ? '1' : '';
+        });
+      });
+    }
+    UI.$$('input', m.el).forEach(i => i.addEventListener('input', repaint));
+    repaint();
+  }
+
+  /* ---------------- 准入/外协商:评分录入 ---------------- */
+  const SCORE_FIELDS = {
+    supplier_apply: [
+      { k: 'score', label: '现场评审得分(0-100)', type: 'int', required: true, def: 75 },
+      { k: 'legal_person', label: '法人代表', type: 'text' },
+      { k: 'registered_capital', label: '注册资本', type: 'money', def: 0 },
+      { k: 'opinion', label: '现场审核记录', type: 'textarea', full: true, ph: '产能、质量体系、财务与合规核查结论' }],
+    processor_audit: [
+      { k: 'sample_result', label: '打样结论', type: 'select', required: true, def: 'pass', opts: { pass: '打样合格', cond: '条件合格(限批量试单)', fail: '打样不合格' } },
+      { k: 'quality_score', label: '质量评分', type: 'int', required: true, def: 80 },
+      { k: 'delivery_score', label: '交付评分', type: 'int', required: true, def: 75 },
+      { k: 'price_score', label: '价格评分', type: 'int', def: 70 },
+      { k: 'manage_score', label: '管理评分', type: 'int', def: 70 },
+      { k: 'capacity', label: '核定月产能(件)', type: 'int', def: 20000 },
+      { k: 'unit_rate', label: '核定加工单价', type: 'money', required: true, def: 3.5 },
+      { k: 'opinion', label: '审核意见', type: 'textarea', full: true, ph: '设备/人员/品控/环保与安全核查记录' }],
+  };
+  function openScoreModal(entity, no, rerender) {
+    const fields = SCORE_FIELDS[entity];
+    const row = DB.find(entity, no);
+    const isApply = entity === 'supplier_apply';
+    const m = UI.modal({
+      title: isApply ? '登记现场审核' : '打样与评分', subtitle: `${row[isApply ? 'company' : 'processor_name'] || ''} · ${no}`, width: 'mid',
+      body: UI.form(fields, row) + (isApply
+        ? `<div class="notice mt12">${icon('info')}<div>得分低于 <b>60</b> 的申请不能核准建档。</div></div>`
+        : `<div class="notice mt12">${icon('info')}<div>综合得分 = 质量×40% + 交付×25% + 价格×20% + 管理×15%;打样不合格或得分低于 60 自动判定为<b>淘汰</b>。</div></div>`),
+      actions: [{ label: '取消' }, { label: '保存评分', cls: 'primary', icon: 'check', onClick: mm => {
+        const rd = UI.readForm(mm.el, fields);
+        if (!rd.ok) { UI.toast('请完善:' + rd.errors.join('、'), 'err'); return false; }
+        try {
+          if (isApply) { ACT.inspectApply(no, rd.values.score, rd.values.opinion); }
+          else { const sc = ACT.inspectAudit(no, rd.values); UI.toast('评分已录入,综合得分 ' + sc); }
+          rerender();
+        } catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+    return m;
+  }
+
+  /* ---------------- 委外:发料 / 收回 ---------------- */
+  function openIssueModal(no, rerender) {
+    const t = DB.find('os_order', no);
+    const lines = DB.lines('os_lines', no);
+    const rowsData = lines.map(l => {
+      const p = DB.find('products', l.product) || {};
+      const remain = (l.qty || 0) - (l.issued || 0);
+      return { product: l.product, product_name: p.name || l.product_name, remain, qty: Math.max(0, remain), cost: p.cost || 0, avail: ACT.available(l.product, t.warehouse) };
+    });
+    UI.modal({
+      title: '委外发料过账', subtitle: `${no} · ${t.processor_name} · 发料仓 ${t.warehouse}`, width: 'mid',
+      body: `<div class="table-wrap"><table class="lines-tbl"><thead><tr><th>材料</th><th class="right" style="width:100px">待发料</th><th class="right" style="width:120px">本次发料</th><th class="right" style="width:110px">单位成本</th><th class="right" style="width:120px">仓库可用</th></tr></thead>
+        <tbody>${rowsData.map((r, i) => `<tr><td><b>${esc(r.product_name)}</b><div class="cell-sub mono">${esc(r.product)}</div></td>
+          <td class="right money">${num(r.remain)}</td>
+          <td class="right"><input type="number" data-q="${i}" value="${Math.max(0, Math.min(r.qty, r.avail))}" min="0" class="num right"></td>
+          <td class="right money">¥${money(r.cost)}</td>
+          <td class="right money" style="${r.avail < r.remain && r.remain > 0 ? 'color:var(--danger)' : ''}">${num(r.avail)}</td></tr>`).join('')}</tbody></table></div>
+        <div class="notice mt12">${icon('info')}<div>发料过账生成流水「委外发料」并记凭证:<b>借 委托加工物资(1408) / 贷 库存商品(1405)</b>。</div></div>`,
+      actions: [{ label: '取消' }, { label: '发料过账', cls: 'primary', icon: 'send', onClick: mm => {
+        const plan = rowsData.map((r, i) => ({ product: r.product, qty: +($(`[data-q="${i}"]`, mm.el) || { value: 0 }).value || 0 }));
+        try { const cost = ACT.issueOS(no, plan); UI.toast(`发料过账完成,材料成本 ¥${money(cost)}`); rerender(); }
+        catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+  }
+  function openReceiveModal(no, rerender) {
+    const t = DB.find('os_order', no);
+    const remain = (t.output_qty || 0) - (t.received_qty || 0);
+    const perMat = r2((t.issued_amount || 0) / (t.output_qty || 1));
+    const fields = [{ k: 'qty', label: '本次收回数量', type: 'int', required: true, def: Math.max(1, remain) },
+      { k: 'note', label: '收检说明', type: 'text', full: true, ph: '抽检比例、良品率、异常批次' }];
+    const preview = (q) => {
+      const last = (t.received_qty || 0) + q >= (t.output_qty || 0);
+      const mat = last ? r2((t.issued_amount || 0) - (t.consumed_amount || 0)) : r2(q * perMat);
+      const fee = r2(q * (t.unit_fee || 0));
+      const vat = r2(fee * ((DB.find('products', t.output_product) || {}).tax_rate || 13) / 100);
+      return `<div class="stat-row mt16"><div>核销材料<b>¥${money(mat)}</b></div><div>加工费(未税)<b>¥${money(fee)}</b></div><div>进项税<b>¥${money(vat)}</b></div><div style="color:var(--primary)">成品入库成本<b>¥${money(r2(mat + fee))}</b></div></div>
+        <div class="notice mt12">${icon('info')}<div>过账后:成品按加权成本入库,<b>借 库存商品 + 应交税费(进项) / 贷 委托加工物资 + 应付账款(加工费)</b>,并自动生成加工费应付账单${last ? ';这是最后一批,尾差材料已全部核销' : ''}。</div></div>`;
+    };
+    const m = UI.modal({
+      title: '委外收回成品', subtitle: `${no} · ${t.processor_name} · 待收回 ${remain} 件`,
+      body: UI.form(fields, {}) + `<div id="os-pv">${preview(Math.max(1, remain))}</div>`,
+      actions: [{ label: '取消' }, { label: '收回并挂账', cls: 'success', icon: 'download', onClick: mm => {
+        const rd = UI.readForm(mm.el, fields);
+        if (!rd.ok) { UI.toast('请填写收回数量', 'err'); return false; }
+        try { const b = ACT.receiveOS(no, rd.values.qty); UI.toast('已入库并生成加工费账单 ' + b); rerender(); }
+        catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+    const inp = $('[data-k="qty"]', m.el) || $('input[type="number"]', m.el);
+    if (inp) inp.addEventListener('input', () => { $('#os-pv', m.el).innerHTML = preview(+inp.value || 0); });
+  }
+
+  /* ---------------- 售后:退款 / 维修 ---------------- */
+  function openRefundModal(no, rerender) {
+    const t = DB.find('rma', no);
+    const inv = DB.find('invoice', t.credit_invoice) || {};
+    const max = r2(-inv.balance || 0);
+    if (max <= 0) { UI.toast('红字发票已退清,无需退款', 'warn'); return; }
+    const fields = [{ k: 'amount', label: '退款金额', type: 'money', required: true, def: max },
+      { k: 'method', label: '退款方式', type: 'select', required: true, def: '原路退回', opts: { '原路退回': 1, '银行转账': 1, '电汇 T/T': 1, '余额抵扣': 1 } },
+      { k: 'note', label: '退款说明', type: 'text', full: true }];
+    UI.modal({
+      title: '登记售后退款', subtitle: `${no} · ${t.customer_name} · 红字发票 ${inv.no}`,
+      body: UI.form(fields, {}) + `<div class="notice mt12">${icon('info')}<div>退款生成<b>负数收款单</b>冲减应收:<b>借 应收账款(1122) / 贷 银行存款(1002)</b>,应收明细账与总账保持勾稽。</div></div>`,
+      actions: [{ label: '取消' }, { label: '确认退款', cls: 'primary', icon: 'wallet', onClick: mm => {
+        const rd = UI.readForm(mm.el, fields);
+        if (!rd.ok) { UI.toast('请填写退款金额', 'err'); return false; }
+        try { const rc = ACT.refundRMA(no, rd.values.amount, rd.values.method); UI.toast('退款单 ' + rc + ' 已过账'); rerender(); }
+        catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+  }
+  function openRepairModal(no, rerender) {
+    const t = DB.find('rma', no);
+    const fields = [{ k: 'cost', label: '维修费用', type: 'money', required: true, def: r2((t.amount || 0) * 0.15) },
+      { k: 'liability', label: '责任归属', type: 'select', required: true, def: t.liability || 'company', opts: { company: '我司承担', supplier: '供应商承担', customer: '客户付费' } },
+      { k: 'note', label: '维修工单', type: 'text', full: true, ph: '故障现象、维修方案、更换配件' }];
+    UI.modal({
+      title: '登记维修费用', subtitle: `${no} · ${t.customer_name}`,
+      body: UI.form(fields, {}) + `<div class="notice mt12">${icon('info')}<div>维修费按<b>销售费用(6601)</b>费用化处理;客户付费维修则直接冲减银行存款并计入当期收入。</div></div>`,
+      actions: [{ label: '取消' }, { label: '确认登记', cls: 'primary', icon: 'check', onClick: mm => {
+        const rd = UI.readForm(mm.el, fields);
+        if (!rd.ok) { UI.toast('请填写维修费用', 'err'); return false; }
+        try {
+          const cur = DB.find('rma', no); cur.liability = rd.values.liability; DB.upsert('rma', cur);
+          const c = ACT.repairRMA(no, rd.values.cost); UI.toast(`维修费 ¥${money(c)} 已过账`); rerender();
+        } catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+  }
+
   /* ---------------- 单据编辑器(新建/修改) ---------------- */
   const NEW_CFG = {
     sales_order: { entity: 'sales_order', title: '销售订单', lines: 'so_lines', priceKey: 'price',
@@ -398,6 +876,8 @@ window.DOC = (function () {
         { k: 'date', label: '订单日期', type: 'date', required: true, def: () => DB.today() },
         { k: 'required_date', label: '需求到货日', type: 'date', def: () => DB.addDays(DB.today(), 7) },
         { k: 'payment_terms', label: '结算方式', type: 'select', opts: SCHEMA.PAYTERM, def: 'NET30' },
+        { k: 'channel', label: '订单渠道', type: 'select', opts: SCHEMA.entities.sales_order.fields.channel.opts, def: 'offline' },
+        { k: 'priority', label: '紧急度', type: 'select', opts: SCHEMA.entities.sales_order.fields.priority.opts, def: 'std' },
         { k: 'salesperson', label: '销售员', type: 'text', def: () => DB.currentUser() },
         { k: 'note', label: '备注', type: 'textarea', full: true }],
       cols: ['qty', 'price', 'discount', 'tax'] },
@@ -433,35 +913,129 @@ window.DOC = (function () {
         { k: 'date', label: '盘点日期', type: 'date', required: true, def: () => DB.today() },
         { k: 'note', label: '盘点说明', type: 'text', full: true }],
       cols: ['count'] },
+
+    /* ---------------- 询价比价 ---------------- */
+    rfq: { entity: 'rfq', title: '询价单', lines: 'rfq_lines',
+      head: [
+        { k: 'title', label: '询价主题', type: 'text', required: true, full: true, ph: '如:Q4 家居类新品面料三家比价' },
+        { k: 'buyer', label: '采购员', type: 'text', required: true, def: () => DB.currentUser() },
+        { k: 'date', label: '询价日期', type: 'date', required: true, def: () => DB.today() },
+        { k: 'need_date', label: '需求到货日', type: 'date', def: () => DB.addDays(DB.today(), 21) },
+        { k: 'warehouse', label: '收货仓库', type: 'ref', ref: 'warehouses', required: true, def: 'WH-HZ01' },
+        { k: 'note', label: '技术与商务要求', type: 'textarea', full: true }],
+      cols: ['qty', 'price'] },
+
+    /* ---------------- 新品发布 ---------------- */
+    product_release: { entity: 'product_release', title: '新品发布单', lines: null, cols: [],
+      head: [
+        { k: 'name', label: '商品名称', type: 'text', required: true, full: true, ph: '如:北欧简约棉麻抱枕套(45×45)' },
+        { k: 'category', label: '类目', type: 'select', required: true, def: '家居用品', opts: SCHEMA.entities.products.fields.category.opts },
+        { k: 'brand', label: '品牌', type: 'text', def: '赛福优选' },
+        { k: 'spec', label: '规格型号', type: 'text', ph: '尺寸/材质/颜色' },
+        { k: 'uom', label: '计量单位', type: 'select', def: 'PCS', opts: SCHEMA.entities.products.fields.uom.opts },
+        { k: 'target_cost', label: '目标成本', type: 'money', required: true, def: 0 },
+        { k: 'target_price', label: '拟售价(未税)', type: 'money', required: true, def: 0 },
+        { k: 'listing', label: '首发渠道', type: 'select', required: true, def: 'tmall', opts: SCHEMA.entities.products.fields.listing.opts },
+        { k: 'safety_qty', label: '首单备货量', type: 'int', def: 200 },
+        { k: 'moq', label: '最小起订量', type: 'int', def: 50 },
+        { k: 'supplier', label: '首发供应商', type: 'ref', ref: 'suppliers' },
+        { k: 'owner', label: '产品开发', type: 'text', required: true, def: () => DB.currentUser() },
+        { k: 'launch_date', label: '计划上架日', type: 'date', required: true, def: () => DB.addDays(DB.today(), 30) },
+        { k: 'note', label: '立项说明', type: 'textarea', full: true, ph: '市场容量、竞品对比、毛利预期、上市节奏' }],
+      notice: '保存草稿后提交产品评审;审批通过点击「建档并上架」,系统会自动生成商品主档并启用。' },
+
+    /* ---------------- 供应商准入 ---------------- */
+    supplier_apply: { entity: 'supplier_apply', title: '供应商准入申请', lines: null, cols: [],
+      head: [
+        { k: 'company', label: '企业全称', type: 'text', required: true, full: true },
+        { k: 'credit_code', label: '统一社会信用代码', type: 'text', required: true },
+        { k: 'category', label: '主营类目', type: 'select', required: true, def: '家居用品', opts: SCHEMA.entities.products.fields.category.opts },
+        { k: 'contact', label: '业务联系人', type: 'text', required: true },
+        { k: 'phone', label: '联系电话', type: 'text', required: true },
+        { k: 'email', label: '邮箱', type: 'text' },
+        { k: 'legal_person', label: '法人代表', type: 'text' },
+        { k: 'registered_capital', label: '注册资本', type: 'money', def: 0 },
+        { k: 'annual_capacity', label: '年产能(件)', type: 'int', def: 0 },
+        { k: 'main_products', label: '主打产品', type: 'text' },
+        { k: 'address', label: '注册地址', type: 'text', full: true },
+        { k: 'applicant', label: '引入采购员', type: 'text', required: true, def: () => DB.currentUser() },
+        { k: 'note', label: '引入理由', type: 'textarea', full: true }],
+      notice: '流程:提交准入评审 → 资格初审 → 现场审核评分 → 核准 → 自动生成供应商档案。' },
+
+    /* ---------------- 外协商审核 ---------------- */
+    processor_audit: { entity: 'processor_audit', title: '外协商审核单', lines: null, cols: [],
+      head: [
+        { k: 'processor', label: '外协商', type: 'ref', ref: 'processors', required: true },
+        { k: 'process_type', label: '加工类型', type: 'select', required: true, def: 'sew', opts: SCHEMA.entities.processors.fields.process_type.opts },
+        { k: 'date', label: '审核日期', type: 'date', required: true, def: () => DB.today() },
+        { k: 'auditor', label: '审核人', type: 'text', required: true, def: () => DB.currentUser() },
+        { k: 'unit_rate', label: '报价加工单价', type: 'money', def: 3.5 },
+        { k: 'capacity', label: '申报月产能', type: 'int', def: 20000 },
+        { k: 'note', label: '审核范围', type: 'textarea', full: true, ph: '打样品类、验厂重点、样品单号' }],
+      notice: '打样与四项评分录入后,综合得分 ≥60 且打样合格才会核准;核准结果自动回写服务商档案。' },
+
+    /* ---------------- 委外加工 ---------------- */
+    os_order: { entity: 'os_order', title: '委外加工单', lines: 'os_lines',
+      head: [
+        { k: 'processor', label: '服务商', type: 'ref', ref: 'processors', required: true },
+        { k: 'process_type', label: '加工类型', type: 'select', required: true, def: 'sew', opts: SCHEMA.entities.processors.fields.process_type.opts },
+        { k: 'warehouse', label: '收发库', type: 'ref', ref: 'warehouses', required: true, def: 'WH-HZ01' },
+        { k: 'date', label: '下单日期', type: 'date', required: true, def: () => DB.today() },
+        { k: 'output_product', label: '加工成品', type: 'ref', ref: 'products', required: true },
+        { k: 'output_qty', label: '计划加工数', type: 'int', required: true, def: 500 },
+        { k: 'unit_fee', label: '加工费单价(未税)', type: 'money', required: true, def: 3.5 },
+        { k: 'need_date', label: '预计完工日', type: 'date', def: () => DB.addDays(DB.today(), 15) },
+        { k: 'note', label: '工艺要求', type: 'textarea', full: true }],
+      cols: ['qty', 'price'],
+      notice: '明细行填写发往服务商的材料(计划发料与单位成本);发料过账后材料转入「委托加工物资」。' },
+
+    /* ---------------- 售后工单 ---------------- */
+    rma: { entity: 'rma', title: '售后工单', lines: 'rma_lines',
+      head: [
+        { k: 'so', label: '原销售订单', type: 'ref', ref: 'sales_order', required: true },
+        { k: 'customer', label: '客户', type: 'ref', ref: 'customers', required: true },
+        { k: 'type', label: '售后类型', type: 'select', required: true, def: 'return', opts: SCHEMA.entities.rma.fields.type.opts },
+        { k: 'reason', label: '售后原因', type: 'select', required: true, def: 'quality', opts: SCHEMA.entities.rma.fields.reason.opts },
+        { k: 'liability', label: '责任归属', type: 'select', required: true, def: 'company', opts: SCHEMA.entities.rma.fields.liability.opts },
+        { k: 'warehouse', label: '退货入库仓', type: 'ref', ref: 'warehouses', def: 'WH-HZ01' },
+        { k: 'date', label: '受理日期', type: 'date', required: true, def: () => DB.today() },
+        { k: 'handler', label: '处理人', type: 'text', required: true, def: () => DB.currentUser() },
+        { k: 'note', label: '客诉描述', type: 'textarea', full: true, ph: '客户反馈、批次、图片证据编号' }],
+      cols: ['qty', 'price', 'tax'],
+      notice: '退货入库冲回成本;红字发票冲减收入与应收;退款以负数收款单核销应收,明细账与总账保持勾稽。' },
   };
 
-  function newDoc(entity) { editDoc(entity, null); }
+  function newDoc(entity, pre) { editDoc(entity, null, null, pre); }
   function openEditor(entity, no, rerender) { editDoc(entity, no, rerender); }
 
-  function editDoc(entity, no, rerender) {
+  function editDoc(entity, no, rerender, pre) {
     const cfg = NEW_CFG[entity]; if (!cfg) return;
     const isNew = !no;
-    const headVals = isNew ? defVals(cfg.head) : DB.find(entity, no);
-    let lines = isNew ? [] : DB.lines(cfg.lines, no).map(l => Object.assign({}, l));
-    if (cfg.cols.indexOf('count') >= 0 && !isNew) lines = [];
+    const hasLines = !!cfg.lines;
+    const headVals = isNew ? Object.assign(defVals(cfg.head), pre || {}) : DB.find(entity, no);
+    let lines = !hasLines ? [] : (isNew ? [] : DB.lines(cfg.lines, no).map(l => Object.assign({}, l)));
+    if (hasLines && cfg.cols.indexOf('count') >= 0 && !isNew) lines = [];
 
     const m = UI.modal({
-      title: (isNew ? '新建' : '编辑') + cfg.title, width: 'wide', subtitle: isNew ? '保存为草稿,审核后方可执行后续动作' : no,
+      title: (isNew ? '新建' : '编辑') + cfg.title, width: hasLines ? 'wide' : 'mid', subtitle: isNew ? (cfg.notice || '保存为草稿,审核后方可执行后续动作') : no,
       body: `<div id="ed-head">${UI.form(cfg.head, headVals)}</div>
-        <div class="section-title mt20">明细行</div>
-        <div id="ed-lines"></div>`,
+        ${hasLines ? `<div class="section-title mt20">明细行</div><div id="ed-lines"></div>` : ''}`,
       actions: [{ label: '取消' },
         isNew ? { label: '保存草稿', icon: 'file', onClick: mm => submit(mm, false) } : null,
-        isNew ? { label: '保存并审核', cls: 'primary', icon: 'check', onClick: mm => submit(mm, true) }
+        isNew ? { label: '保存并提交', cls: 'primary', icon: 'check', onClick: mm => submit(mm, true) }
                : { label: '保存修改', cls: 'primary', icon: 'check', onClick: mm => submit(mm, false) }].filter(Boolean)
     });
-    const ed = new LineEditor($('#ed-lines', m.el), cfg, lines, m);
-    ed.add();
+    let ed = null;
+    if (hasLines) { ed = new LineEditor($('#ed-lines', m.el), cfg, lines, m); ed.add(); }
+    const SUBMIT_HOOK = {
+      product_release: ACT.submitRelease, supplier_apply: ACT.submitApply,
+      processor_audit: ACT.submitAudit, rma: ACT.submitRMA,
+    };
     function submit(mm, andConfirm) {
       const rd = UI.readForm(mm.el, cfg.head);
       if (!rd.ok) { UI.toast('请完善表头信息:' + rd.errors.join('、'), 'err'); return false; }
-      const lns = ed.values();
-      if (!lns.length) { UI.toast('请至少添加一行有效明细', 'err'); return false; }
+      const lns = ed ? ed.values() : [];
+      if (hasLines && !lns.length) { UI.toast('请至少添加一行有效明细', 'err'); return false; }
       try {
         const target = isNew ? ACT.autoCode(entity) : no;
         const header = rd.values;
@@ -472,26 +1046,35 @@ window.DOC = (function () {
           if (f.t === 'ref' && f.name && header[k]) header[k + '_name'] = (DB.find(f.ref, header[k]) || {})[f.name] || header[k];
           if (isNew && header[k] === undefined && f.def !== undefined) header[k] = typeof f.def === 'function' ? f.def() : f.def;
         });
-        let total = 0;
-        if (cfg.cols.indexOf('count') >= 0) { /* 盘点单无金额 */ }
-        else total = ACT.docTotal(lns);
-        header.total = total; header.amount = total;
-        if (entity === 'purchase_req') header.amount = r2(lns.reduce((s, l) => s + l.qty * l.price, 0));
+        if (hasLines) {
+          let total = 0;
+          if (cfg.cols.indexOf('count') >= 0) total = 0;
+          else total = ACT.docTotal(lns);
+          header.total = total; header.amount = total;
+          if (entity === 'purchase_req') header.amount = r2(lns.reduce((s, l) => s + l.qty * l.price, 0));
+        }
         if (isNew) {
           header.status = 'draft';
-          if (entity === 'transfer' || entity === 'stocktake') delete header.total;
+          if (entity === 'transfer' || entity === 'stocktake' || !hasLines) delete header.total;
           DB.insert(entity, header);
-          DB.setLines(cfg.lines, target, lns.map(l => Object.assign({}, l, { doc: target })));
-          DB.log('单据管理', '新建' + cfg.title, target, `${lns.length} 行`);
+          if (hasLines) DB.setLines(cfg.lines, target, lns.map(l => Object.assign({}, l, { doc: target })));
+          DB.log('单据管理', '新建' + cfg.title, target, hasLines ? `${lns.length} 行` : '表头信息');
         } else if (entity === 'sales_order') {
           ACT.saveSO(no, header, lns);
         } else {
           const cur = DB.find(entity, no);
           if (['sales_order', 'purchase_order'].includes(entity) && cur.status !== 'draft') throw new Error('仅草稿状态可编辑');
+          if (SUBMIT_HOOK[entity] && cur.status !== 'draft') throw new Error('仅草稿状态可编辑');
           Object.assign(cur, header); DB.upsert(entity, cur);
-          DB.setLines(cfg.lines, no, lns.map(l => Object.assign({}, l, { doc: no })));
+          if (hasLines) DB.setLines(cfg.lines, no, lns.map(l => Object.assign({}, l, { doc: no })));
         }
-        if (andConfirm) { if (entity === 'sales_order') ACT.confirmSO(target); else if (entity === 'purchase_order') ACT.confirmPO(target); else { const t = DB.find(entity, target); t.status = 'pending'; DB.upsert(entity, t); } }
+        if (andConfirm) {
+          if (entity === 'sales_order') ACT.confirmSO(target);
+          else if (entity === 'purchase_order') ACT.confirmPO(target);
+          else if (entity === 'os_order') ACT.confirmOS(target);
+          else if (SUBMIT_HOOK[entity]) SUBMIT_HOOK[entity](target);
+          else { const t = DB.find(entity, target); t.status = 'pending'; DB.upsert(entity, t); }
+        }
         UI.toast((isNew ? '已创建' : '已保存') + ' ' + cfg.title + ' ' + target);
         if (rerender) rerender(); else APP.refresh();
         if (isNew) setTimeout(() => open(entity, target), 120);
@@ -667,6 +1250,32 @@ window.DOC = (function () {
     } else if (entity === 'users') {
       const acts = DB.where('activity', a => a.user === row.name).slice(0, 20);
       extra = `<div class="card"><div class="card-head"><h3>${icon('clock')}该用户操作记录</h3></div><div class="card-body">${acts.length ? `<div class="timeline">${acts.map(a => `<div class="tl-item done"><b>${esc(a.action)}</b><span class="when">${esc(a.time)}</span><p>${esc(a.module)}${a.ref ? ' · ' + esc(a.ref) : ''} ${esc(a.detail || '')}</p></div>`).join('')}</div>` : UI.emptyBox('暂无操作记录')}</div></div>`;
+    } else if (entity === 'processors') {
+      const os = DB.where('os_order', o => o.processor === id).slice(-8).reverse();
+      const aud = DB.where('processor_audit', a => a.processor === id).slice(-6).reverse();
+      const done = os.filter(o => o.status === 'done');
+      const fee = r2(done.reduce((s, o) => s + (o.fee_amount || 0), 0));
+      extra = `<div class="card"><div class="card-head"><h3>${icon('swap')}加工绩效</h3><div class="right">${UI.badge(row.qualification)}</div></div>
+        <div class="card-body"><div class="stat-row"><div>委外工单<b>${os.length} 单</b></div><div>完工批次<b>${done.length}</b></div><div>累计加工费<b>¥${money(fee)}</b></div><div>月产能<b>${num(row.capacity)} 件</b></div><div>核定单价<b>¥${money(row.unit_rate)}</b></div><div>一次合格率<b>${((+row.pass_rate || 0) <= 1 ? (+row.pass_rate || 0) * 100 : +row.pass_rate || 0).toFixed(1)}%</b></div></div>
+        <div class="mt12">综合评分 <b class="mono">${row.rating || 0}</b><div class="progress mt8" style="height:9px"><i class="${(row.rating || 0) >= 80 ? 'ok' : (row.rating || 0) >= 60 ? 'warn' : 'bad'}" style="width:${row.rating || 0}%"></i></div></div></div></div>
+        <div class="card"><div class="card-head"><h3>${icon('clipboard')}审核记录</h3></div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>审核单</th><th>日期</th><th>审核人</th><th>打样</th><th class="right">综合得分</th><th class="right">核定单价</th><th>结论</th></tr></thead><tbody>
+        ${aud.length ? aud.map(a => `<tr><td class="mono cell-link" data-jump="processor_audit=${encodeURIComponent(a.no)}">${esc(a.no)}</td><td>${dateCN(a.date)}</td><td>${esc(a.auditor)}</td><td>${esc(SCHEMA.entities.processor_audit.fields.sample_result.opts[a.sample_result] || a.sample_result || '—')}</td><td class="right money">${num(a.total_score)}</td><td class="right money">¥${money(a.unit_rate)}</td><td>${UI.badge(a.conclusion || a.status)}</td></tr>`).join('') : `<tr><td colspan="7">${UI.emptyBox('暂无审核记录')}</td></tr>`}</tbody></table></div></div>
+        <div class="card"><div class="card-head"><h3>${icon('file')}最近委外加工单</h3></div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>加工单</th><th>日期</th><th>成品</th><th class="right">计划数</th><th class="right">已收数</th><th class="right">加工费</th><th>状态</th></tr></thead><tbody>
+        ${os.length ? os.map(o => `<tr><td class="mono cell-link" data-jump="os_order=${encodeURIComponent(o.no)}">${esc(o.no)}</td><td>${dateCN(o.date)}</td><td>${esc(o.output_name || o.output_product)}</td><td class="right money">${num(o.output_qty)}</td><td class="right money">${num(o.received_qty)}</td><td class="right money">¥${money(o.fee_amount)}</td><td>${UI.badge(o.status)}</td></tr>`).join('') : `<tr><td colspan="7">${UI.emptyBox('暂无委外工单')}</td></tr>`}</tbody></table></div></div>`;
+      foot = `<button class="btn" data-md="pa">${icon('clipboard')}发起外协商审核</button><button class="btn" data-md="os">${icon('swap')}新建委外加工单</button>`;
+    } else if (entity === 'role') {
+      const users = DB.where('users', u => u.role === row.name);
+      const perms = row.perms || [];
+      extra = `<div class="card"><div class="card-head"><h3>${icon('settings')}权限矩阵</h3><div class="right"><span class="muted small">级别 ${row.level} · 已授权 ${perms.length} 项</span></div></div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>功能模块</th><th>查看</th><th>编辑</th><th>审批</th></tr></thead><tbody>
+        ${SCHEMA.PERM_MODULES.map(m => `<tr><td>${esc(m.label)}</td>${['view', 'edit', 'approve'].map(a => `<td>${perms.indexOf(m.key + ':' + a) >= 0 ? '<span class="badge b-success">允许</span>' : '<span class="badge b-plain">—</span>'}</td>`).join('')}</tr>`).join('')}
+        </tbody></table></div></div>
+        <div class="card"><div class="card-head"><h3>${icon('user')}该角色用户</h3></div>
+        <div class="table-wrap"><table class="tbl"><thead><tr><th>工号</th><th>姓名</th><th>部门</th><th>邮箱</th><th>最近登录</th><th>状态</th></tr></thead><tbody>
+        ${users.length ? users.map(u => `<tr><td class="mono">${esc(u.code)}</td><td class="cell-main">${esc(u.name)}</td><td>${esc(u.dept)}</td><td class="muted">${esc(u.email || '')}</td><td class="small muted">${esc(u.last_login || '')}</td><td>${UI.badge(u.status)}</td></tr>`).join('') : `<tr><td colspan="6">${UI.emptyBox('暂无用户挂在该角色下')}</td></tr>`}</tbody></table></div></div>`;
+      foot = `<button class="btn" data-md="perm">${icon('settings')}编辑权限</button>`;
     } else if (entity === 'gl_account') {
       const ls = DB.list('journal_lines').filter(l => l.account === id).slice(-30).reverse();
       extra = `<div class="card"><div class="card-head"><h3>${icon('book')}明细账</h3><div class="right"><span class="muted small">余额(借正贷负)</span><span class="badge ${row.balance >= 0 ? 'b-info' : 'b-purple'}">¥${money(row.balance)}</span></div></div>
@@ -688,6 +1297,9 @@ window.DOC = (function () {
       else if (a === 'so') { d.close(); DOC.newDoc('sales_order'); }
       else if (a === 'po') { d.close(); DOC.newDoc('purchase_order'); }
       else if (a === 'tr') { d.close(); DOC.newDoc('transfer'); }
+      else if (a === 'pa') { d.close(); DOC.newDoc('processor_audit', { processor: id }); }
+      else if (a === 'os') { d.close(); DOC.newDoc('os_order', { processor: id }); }
+      else if (a === 'perm') { d.close(); FLOW.permsFor(id); }
       else if (a === 'adjust') adjustDialog(entity, id, row);
     }));
     d.el.querySelectorAll('[data-jump]').forEach(el => el.addEventListener('click', () => { const [ent, id2] = el.dataset.jump.split('='); d.close(); open(ent, decodeURIComponent(id2)); }));
@@ -762,7 +1374,7 @@ window.DOC = (function () {
       <tbody>${lines.map((l, i) => cfg.isJournal ? `<tr><td>${l.account}</td><td>${l.account_name} ${l.memo || ''}</td><td class="r">${l.debit ? money(l.debit) : ''}</td><td class="r">${l.credit ? money(l.credit) : ''}</td></tr>`
         : entity === 'stocktake' ? `<tr><td>${i + 1}</td><td>${l.product}</td><td>${l.product_name}</td><td class="r">${l.book_qty}</td><td class="r">${l.actual_qty}</td><td class="r">${l.diff}</td></tr>`
         : `<tr><td>${i + 1}</td><td>${l.product}</td><td>${l.product_name}</td><td class="r">${num(l.qty)}</td><td class="r">${money(l.price)}</td><td class="r">${l.discount ? (l.discount * 100) + '%' : '—'}</td><td class="r">${(l.tax_rate || 0)}%</td><td class="r">${money(l.amount)}</td></tr>`).join('')}</tbody></table>
-      <div class="tot">价税合计:<span>${money(row.total || row.amount || row.debit || 0)}</span> &nbsp; 币种:${row.currency || 'CNY'}</div>
+      <div class="tot">价税合计:<span>${money(row.total || row.amount || row.fee_amount || row.debit || 0)}</span> &nbsp; 币种:${row.currency || 'CNY'}</div>
       <div class="sign"><div>制单: ${row.user || DB.currentUser()}</div><div>审核: __________</div><div>客户/供应商签收: __________</div><div>财务: __________</div></div>
       </body></html>`);
     w.document.close(); w.focus();
@@ -776,5 +1388,5 @@ window.DOC = (function () {
     }
   }
 
-  return { open, newDoc, masterDetail, CFG, printDoc, editDoc };
+  return { open, newDoc, masterDetail, CFG, NEW_CFG, printDoc, editDoc };
 })();

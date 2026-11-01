@@ -11,7 +11,7 @@ window.LIST = (function () {
 
   /* 列定义:根据 schema 字段自动生成,可按实体覆盖 */
   const COLUMNS = {
-    products: ['code', 'name', 'category', 'brand', 'cost', 'price', 'safety_qty', 'status'],
+    products: ['code', 'name', 'category', 'brand', 'cost', 'price', 'safety_qty', 'listing', 'status'],
     customers: ['code', 'name', 'type', 'region', 'credit_limit', 'salesperson', 'status'],
     suppliers: ['code', 'name', 'category', 'contact', 'phone', 'lead_time', 'rating', 'status'],
     warehouses: ['code', 'name', 'location', 'manager', 'area', 'status'],
@@ -32,7 +32,18 @@ window.LIST = (function () {
     journal: ['no', 'date', 'type', 'ref', 'memo', 'debit', 'status'],
     gl_account: ['code', 'name', 'type', 'direction', 'balance'],
     activity: ['time', 'user', 'module', 'action', 'ref', 'detail'],
+    rfq: ['no', 'date', 'title', 'buyer', 'need_date', 'quote_lines', 'amount', 'saving', 'status'],
+    product_release: ['no', 'date', 'name', 'category', 'brand', 'target_cost', 'target_price', 'margin', 'listing', 'owner', 'launch_date', 'status'],
+    approval: ['no', 'date', 'module', 'title', 'applicant', 'amount', 'priority', 'approver', 'status'],
+    supplier_apply: ['no', 'date', 'company', 'category', 'contact', 'phone', 'annual_capacity', 'score', 'applicant', 'status'],
+    processors: ['code', 'name', 'process_type', 'location', 'phone', 'capacity', 'unit_rate', 'pass_rate', 'qualification', 'status'],
+    processor_audit: ['no', 'date', 'processor_name', 'process_type', 'auditor', 'sample_result', 'total_score', 'unit_rate', 'conclusion', 'status'],
+    os_order: ['no', 'date', 'processor_name', 'process_type', 'output_name', 'output_qty', 'received_qty', 'unit_fee', 'fee_amount', 'need_date', 'status'],
+    rma: ['no', 'date', 'customer_name', 'so', 'type', 'reason', 'qty', 'amount', 'handler', 'status'],
+    role: ['code', 'name', 'dept', 'level', 'users', 'scope', 'status'],
   };
+  const MASTER = ['products', 'customers', 'suppliers', 'warehouses', 'users', 'gl_account', 'processors', 'role'];
+  const DOCLIKE = ['rfq', 'product_release', 'approval', 'supplier_apply', 'processor_audit', 'os_order', 'rma'];
   const PAGE_SIZE = 15;
 
   /* 派生行数据(库存/科目等需要即时计算) */
@@ -78,7 +89,7 @@ window.LIST = (function () {
       case 'date': return `<span class="nowrap">${dateCN(row[key])}</span>`;
       case 'datetime': return `<span class="nowrap muted small">${esc(row[key])}</span>`;
       case 'code': return `<span class="mono">${esc(row[key])}</span>`;
-      case 'select': return f.badge || ['draft', 'confirmed', 'partial', 'done', 'cancelled', 'open', 'paid', 'partial_paid', 'overdue', 'pending', 'approved', 'rejected', 'converted', 'posted', 'enabled', 'disabled', 'active', 'inactive', 'normal', 'low', 'shortage', 'closed', 'submitted'].indexOf(row[key]) >= 0 ? badge(row[key]) : esc(optText(f, row[key]));
+      case 'select': return f.badge ? badge(row[key]) : esc(optText(f, row[key]));
       case 'ref': return cellRef(f.ref, row[key]);
       default: return esc(row[key]);
     }
@@ -88,10 +99,10 @@ window.LIST = (function () {
     if (!opts) return v;
     if (SCHEMA.STATUS[v]) return SCHEMA.STATUS[v].l;
     const o = opts[v];
-    if (o === undefined) return v;
-    return typeof o === 'object' ? v : o;
+    if (o === undefined || o === null || o === 1 || o === true || typeof o === 'object') return v;
+    return o;
   }
-  function pct(v) { return v ? (v * 100).toFixed(0) + '%' : '0%'; }
+  function pct(v) { const n = +v || 0; return (n <= 1 ? n * 100 : n).toFixed(1) + '%'; }
   function esc(s) { return UI.esc(s); }
   const money = UI.money, num = UI.num, dateCN = UI.dateCN, badge = UI.badge, cellRef = UI.cellRef;
 
@@ -106,7 +117,6 @@ window.LIST = (function () {
   const FILTERS = {
     stock: [{ k: 'warehouse', label: '仓库', entity: 'warehouses' }, { k: 'status', label: '库存状态', opts: { normal: '正常', low: '库存偏低', shortage: '缺货' } }],
     stock_movements: [{ k: 'warehouse', label: '仓库', entity: 'warehouses' }, { k: 'type', label: '类型', opts: SCHEMA.entities.stock_movements.fields.type.opts }],
-    sales_order: [{ k: 'warehouse', label: '发货仓', entity: 'warehouses' }, { k: 'salesperson', label: '销售员', opts: () => fromList('sales_order', 'salesperson') }],
     purchase_order: [{ k: 'warehouse', label: '收货仓', entity: 'warehouses' }, { k: 'buyer', label: '采购员', opts: () => fromList('purchase_order', 'buyer') }],
     invoice: [{ k: 'customer', label: '客户', entity: 'customers' }],
     bill: [{ k: 'supplier', label: '供应商', entity: 'suppliers' }],
@@ -115,6 +125,16 @@ window.LIST = (function () {
     products: [{ k: 'category', label: '类目', opts: fromOpts('products', 'category') }],
     suppliers: [{ k: 'category', label: '类目', opts: fromOpts('suppliers', 'category') }],
     activity: [{ k: 'module', label: '模块', opts: () => fromList('activity', 'module') }],
+    rfq: [{ k: 'buyer', label: '采购员', opts: () => fromList('rfq', 'buyer') }, { k: 'warehouse', label: '收货仓', entity: 'warehouses' }],
+    product_release: [{ k: 'category', label: '类目', opts: fromOpts('product_release', 'category') }, { k: 'listing', label: '上架渠道', opts: fromOpts('product_release', 'listing') }, { k: 'owner', label: '开发负责人', opts: () => fromList('product_release', 'owner') }],
+    approval: [{ k: 'module', label: '审批类型', opts: fromOpts('approval', 'module') }, { k: 'priority', label: '紧急度', opts: fromOpts('approval', 'priority') }, { k: 'applicant', label: '发起人', opts: () => fromList('approval', 'applicant') }],
+    supplier_apply: [{ k: 'category', label: '类目', opts: fromOpts('supplier_apply', 'category') }, { k: 'applicant', label: '引入人', opts: () => fromList('supplier_apply', 'applicant') }],
+    processors: [{ k: 'process_type', label: '加工类型', opts: fromOpts('processors', 'process_type') }],
+    processor_audit: [{ k: 'process_type', label: '加工类型', opts: fromOpts('processor_audit', 'process_type') }, { k: 'auditor', label: '审核人', opts: () => fromList('processor_audit', 'auditor') }],
+    os_order: [{ k: 'processor', label: '服务商', entity: 'processors' }, { k: 'process_type', label: '加工类型', opts: fromOpts('os_order', 'process_type') }, { k: 'warehouse', label: '收发库', entity: 'warehouses' }],
+    rma: [{ k: 'customer', label: '客户', entity: 'customers' }, { k: 'type', label: '售后类型', opts: fromOpts('rma', 'type') }, { k: 'reason', label: '售后原因', opts: fromOpts('rma', 'reason') }],
+    role: [{ k: 'dept', label: '部门', opts: fromOpts('role', 'dept') }],
+    sales_order: [{ k: 'warehouse', label: '发货仓', entity: 'warehouses' }, { k: 'channel', label: '渠道', opts: fromOpts('sales_order', 'channel') }, { k: 'priority', label: '紧急度', opts: fromOpts('sales_order', 'priority') }, { k: 'salesperson', label: '销售员', opts: () => fromList('sales_order', 'salesperson') }],
   };
   function fromList(entity, field) {
     const out = {};
@@ -134,6 +154,9 @@ window.LIST = (function () {
     </div>`;
   }
 
+  const APPROVAL_ENTITY = { product_release: 'product_release', supplier_apply: 'supplier_apply', processor_audit: 'processor_audit',
+    purchase_req: 'purchase_req', so_change: 'sales_order', price_change: 'sales_order', rma: 'rma', os_order: 'os_order', stock_adjust: 'products' };
+
   function render(entity, mount) {
     const e = SCHEMA.entities[entity], s = st(entity);
     const rows = filtered(entity);
@@ -146,7 +169,7 @@ window.LIST = (function () {
         k, label: f.l || k, align: f.t === 'money' || f.t === 'int' ? 'right' : 'left',
         sortable: true,
         render: row => {
-          if (isPK && (e.doc || ['products', 'customers', 'suppliers', 'warehouses', 'users', 'gl_account'].indexOf(entity) >= 0)) return nameCell(entity, k, row);
+          if (isPK && (e.doc || MASTER.indexOf(entity) >= 0 || DOCLIKE.indexOf(entity) >= 0)) return nameCell(entity, k, row);
           if (k === 'product_name' || k === 'customer_name' || k === 'supplier_name') return `<span class="${k === 'product_name' ? '' : 'cell-main'}">${esc(row[k] || '')}</span>` + (row.product ? `<div class="cell-sub mono">${esc(row.product)}</div>` : '');
           if (k === 'qty' && entity === 'stock_movements') return `<span class="money ${row.qty < 0 ? 'neg' : ''}" style="${row.qty < 0 ? 'color:var(--danger)' : ''}">${row.qty > 0 ? '+' : ''}${num(row.qty)}</span>`;
           if (k === 'balance') return `<span class="money" style="${(+row.balance < 0) ? 'color:var(--danger)' : ''}">${money(row.balance)}</span>`;
@@ -154,6 +177,10 @@ window.LIST = (function () {
           if (k === 'value') return `<span class="money strong">${money(row.value)}</span>`;
           if (k === 'rating') return `<div class="flex" style="gap:8px"><div class="progress" style="width:70px"><i class="${row.rating >= 80 ? 'ok' : row.rating >= 60 ? 'warn' : 'bad'}" style="width:${row.rating}%"></i></div><span class="small muted">${row.rating}</span></div>`;
           if (k === 'ref' && row[k]) return refLink(entity, row[k]);
+          if (k === 'biz' && entity === 'approval') {
+            const ent = APPROVAL_ENTITY[row.module];
+            return row.biz && ent ? `<span class="cell-link mono" data-open-doc="${ent}=${encodeURIComponent(row.biz)}">${esc(row.biz)}</span>` : esc(row.biz || '—');
+          }
           if (k === 'so' || k === 'po' || k === 'invoice' || k === 'bill' || k === 'gr') return row[k] ? cellRef(k === 'so' ? 'sales_order' : k === 'po' ? 'purchase_order' : k === 'invoice' ? 'invoice' : k === 'bill' ? 'bill' : 'gr', row[k]) : '—';
           if (k === 'name' && !isPK) return `<span class="cell-main">${esc(row[k])}</span>` + (row.code ? `<div class="cell-sub mono">${esc(row.code)}</div>` : '');
           if (k === 'type' && entity === 'gl_account') return badgeAccount(row.direction);
@@ -290,7 +317,7 @@ window.LIST = (function () {
     }));
     UI.$$('[data-page]', root).forEach(b => b.addEventListener('click', () => { if (b.disabled) return; s.page = +b.dataset.page; rerender(); }));
     const nb = UI.$('[data-new]', root); if (nb) nb.addEventListener('click', () => {
-      if (entity === 'sales_order' || entity === 'purchase_order' || entity === 'purchase_req' || entity === 'transfer' || entity === 'stocktake') DOC.newDoc(entity);
+      if (DOC.NEW_CFG[entity]) DOC.newDoc(entity);
       else masterForm(entity);
     });
     const ex = UI.$('[data-export]', root); if (ex) ex.addEventListener('click', () => exportCSV(entity));
@@ -313,9 +340,9 @@ window.LIST = (function () {
   }
   function openDoc(entity, id) {
     const e = SCHEMA.entities[entity];
-    if (e.doc || ['sales_order', 'purchase_order', 'invoice', 'delivery', 'gr', 'bill', 'journal', 'purchase_req', 'transfer', 'stocktake', 'payment', 'receipt'].indexOf(entity) >= 0) {
+    if (e.doc || DOCLIKE.indexOf(entity) >= 0 || ['sales_order', 'purchase_order', 'invoice', 'delivery', 'gr', 'bill', 'journal', 'purchase_req', 'transfer', 'stocktake', 'payment', 'receipt'].indexOf(entity) >= 0) {
       DOC.open(entity, id);
-    } else if (['products', 'customers', 'suppliers', 'warehouses', 'users', 'gl_account'].indexOf(entity) >= 0) {
+    } else if (MASTER.indexOf(entity) >= 0) {
       DOC.masterDetail(entity, id);
     } else {
       masterForm(entity, id);

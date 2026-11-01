@@ -50,7 +50,8 @@ window.UI = (function () {
     filter: '<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
   };
   function icon(name, cls) {
-    return `<svg class="${cls || ''}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || P.info}</svg>`;
+    /* 默认 16px:内联 SVG 无宽高属性时浏览器会按 300x150 固有尺寸渲染,撑爆容器 */
+    return `<svg class="${cls || ''}" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || P.info}</svg>`;
   }
 
   /* ---------------- Format ---------------- */
@@ -177,7 +178,11 @@ window.UI = (function () {
         const t = SCHEMA.entities[f.ref];
         opts = DB.list(f.ref).map(r => [r[t.pk], (r.name ? r.name + ' · ' : '') + r[t.pk]]);
       } else if (f.opts) {
-        opts = Object.keys(f.opts).map(k => [k, typeof f.opts[k] === 'object' ? (SCHEMA.STATUS[k] ? SCHEMA.STATUS[k].l : k) : f.opts[k]]);
+        opts = Object.keys(f.opts).map(k => {
+          const o = f.opts[k];
+          const raw = o === 1 || o === true || o === undefined || typeof o === 'object';
+          return [k, raw ? ((SCHEMA.STATUS[k] || {}).l || k) : o];
+        });
       }
       input = `<select data-k="${f.k}" ${f.readonly ? 'disabled' : ''}>${f.placeholder !== false ? `<option value="">${esc(f.ph || '请选择')}</option>` : ''}${opts.map(o => `<option value="${esc(o[0])}" ${String(o[0]) === String(v) ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select>`;
     } else if (f.type === 'bool') {

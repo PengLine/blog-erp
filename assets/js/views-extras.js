@@ -111,9 +111,12 @@ window.EXTRAS = (function () {
   function guide() {
     const flow = `
       <div class="grid g3">
-        ${[['销售到收款 Order-to-Cash', 'SO 销售订单 → 审核(占用库存)→ DL 出库(库存流水+结转成本凭证)→ IV 发票(应收+收入凭证)→ RC 收款(核销应收)', '#4F46E5'],
-          ['采购到付款 Procure-to-Pay', 'PR 申请 → 审批 → PO 订单 → 审核 → GR 收货(库存+移动加权成本)→ PB 账单(应付+进项税)→ PY 付款(核销应付)', '#0EA5E9'],
-          ['库存与财务 Inventory-to-Finance', '调拨 TR / 盘点 ST 过账 → 出入库流水 MV → 库存现量重算 → 凭证 JE → 科目余额 → 账龄/毛利/周转报表', '#047857']].map(x => `
+        ${[['销售到收款 Order-to-Cash', 'SO 销售订单 → 审核(占用库存)→ DL 出库(库存流水+结转成本凭证)→ IV 发票(应收+收入凭证)→ RC 收款(核销应收);变更/关闭走审批中心裁决后回写订单。', '#4F46E5'],
+          ['采购到付款 Procure-to-Pay', 'RFQ 询价比价 → 定标拆单 → PR 申请 → 审批 → PO 订单 → 审核 → GR 收货(库存+移动加权成本)→ PB 账单(应付+进项税)→ PY 付款(核销应付)。', '#0EA5E9'],
+          ['库存与财务 Inventory-to-Finance', '调拨 TR / 盘点 ST 过账 → 出入库流水 MV → 库存现量重算 → 凭证 JE → 科目余额 → 账龄/毛利/周转报表;有借必有贷、账实勾稽由系统强制。', '#047857'],
+          ['新品到上架 Product-to-Shelf', '供应商准入 SA(现场评审打分)→ 商品主档 → 新品发布单 → 销售主管裁决毛利与渠道 → 建档上架 → 首单采购;下架保留主档与历史交易。', '#7C3AED'],
+          ['委外加工 Outsource', '外协商审核 PA(打样+四维评分)→ 入池核定单价产能 → OS 加工单 → 发料(借 1408 委托加工物资 / 贷 1405)→ 收回(材料+加工费计入成品成本)→ 加工费账单结算。', '#B45309'],
+          ['售后闭环 Return-to-Refund', 'RM 工单(退货/换货/维修)→ 销售主管审批 → 退货入库冲回成本 → 红字发票冲减应收 → 退款(负数收款单)或换货重发;维修费按责任归属费用化或挂应付追偿。', '#BE123C']].map(x => `
         <div class="card"><div class="card-head"><h3 style="color:${x[2]}">${x[0]}</h3></div><div class="card-body"><p class="small" style="line-height:1.9;color:var(--text-2)">${x[1]}</p></div></div>`).join('')}
       </div>`;
     const tables = SCHEMA.visible().filter(k => !['activity'].includes(k)).map(k => {
@@ -132,9 +135,9 @@ window.EXTRAS = (function () {
     return `<div class="page-head"><div><h2>关于与数据字典</h2><div class="desc">Sailfish ERP 是一个纯静态、零依赖、零构建的企业资源计划演示系统:业务模型、单据流转、库存核算与总账勾稽关系均对齐真实 ERP 实现方式。</div></div>
       <div class="page-actions"><button class="btn" data-route="settings">${icon('database')}数据管理</button><button class="btn primary" data-route="dashboard">${icon('dashboard')}进入看板</button></div></div>
       <div class="grid g4">
-        ${UI.kpi({ label: '业务模块', value: num(7) + '<small> 个</small>', icon: 'grid', color: '#4F46E5', foot: '销售/采购/库存/财务/报表' })}
+        ${UI.kpi({ label: '业务模块', value: num(12) + '<small> 个</small>', icon: 'grid', color: '#4F46E5', foot: '销售/采购/库存/财务/产品/服务商/售后/权限' })}
         ${UI.kpi({ label: '数据表', value: num(SCHEMA.visible().length) + '<small> 张</small>', icon: 'layers', color: '#0EA5E9', foot: '含单据主子表结构' })}
-        ${UI.kpi({ label: '业务动作', value: num(18) + '<small> 项</small>', icon: 'swap', color: '#047857', foot: '审核/过账/结算全链路' })}
+        ${UI.kpi({ label: '业务动作', value: num(Object.keys(ACT).filter(k => typeof ACT[k] === 'function').length) + '<small> 项</small>', icon: 'swap', color: '#047857', foot: '审核/过账/结算全链路' })}
         ${UI.kpi({ label: '存储方式', value: 'localStorage', icon: 'database', color: '#7C3AED', foot: '离线可用,可导出备份' })}
       </div>
       <div class="mt20"><div class="section-title">核心业务流程(三单匹配 + 自动凭证)</div>${flow}</div>
