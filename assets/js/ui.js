@@ -48,6 +48,8 @@ window.UI = (function () {
     eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
     upload: '<path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M4 21h16"/>',
     filter: '<path d="M22 3H2l8 9.46V19l4 2v-8.54z"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v3"/>',
+    unlock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
   };
   function icon(name, cls) {
     /* 默认 16px:内联 SVG 无宽高属性时浏览器会按 300x150 固有尺寸渲染,撑爆容器 */
@@ -79,9 +81,14 @@ window.UI = (function () {
   function frag(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; }
 
   /* ---------------- Status ---------------- */
-  function badge(value) {
+  /* kind='ap' 用于应付侧:同一状态码在应收/应付语境下中文不同(未收款 / 未付款) */
+  function stLabel(value, kind) {
     const s = SCHEMA.STATUS[value];
-    return s ? `<span class="badge ${s.c}">${s.l}</span>` : `<span class="badge b-plain">${esc(value)}</span>`;
+    return s ? ((kind === 'ap' && s.ap) || s.l) : String(value);
+  }
+  function badge(value, kind) {
+    const s = SCHEMA.STATUS[value];
+    return s ? `<span class="badge ${s.c}">${stLabel(value, kind)}</span>` : `<span class="badge b-plain">${esc(value)}</span>`;
   }
   function refName(entity, key) {
     if (!entity || !key) return '—';
@@ -319,7 +326,7 @@ window.UI = (function () {
   const VIEWS_BY_ENTITY = {};
   function registerEntityView(entity, view) { VIEWS_BY_ENTITY[entity] = view; }
 
-  return { P, icon, money, cny, compact, num, dateCN, esc, days, round2, $, $$, frag, badge, refName, cellRef,
+  return { P, icon, money, cny, compact, num, dateCN, esc, days, round2, $, $$, frag, badge, stLabel, refName, cellRef,
     table, emptyBox, pager, modal, drawer, confirm, toast, form, field, readForm, lineChart, barChart, donut, hbars, legend,
     descs, kpi, toolbarSearch, chips, registerEntityView, VIEWS_BY_ENTITY, PAL };
 })();

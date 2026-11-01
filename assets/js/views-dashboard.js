@@ -183,7 +183,7 @@ window.DASH = (function () {
     add('待审批采购申请', prPend, '等待采购主管审批,可一键转采购订单', 'purchase_req', '去审批', 'b-warning');
     add('待审核采购订单', poDraft, '草稿采购订单需下发供应商', 'purchase_order', '去审核', 'b-neutral');
     add('待收货采购订单', poWait, '到货后需录入采购收货单', 'purchase_order', '去收货', 'b-info');
-    add('收货未开票账单', grNoBill, '收货单尚未生成应付账单,需做三单匹配', 'gr', '生成账单', 'b-purple');
+    add('货到票未到待清算', grNoBill, '收货已按不含税成本暂估入账 贷2203,需录入采购发票冲销暂估', 'gr', '录入发票', 'b-purple');
     add('逾期未收发票', overdue, '已超出信用到期日,建议立即催收', 'invoice', '催收', 'b-danger');
     add('待收款发票', openInv, '到期未过 30 天的正常应收', 'invoice', '登记收款', 'b-warning');
     add('逾期未付账单', overdueBill, '可能影响供应商信用,请安排付款', 'bill', '去付款', 'b-danger');
@@ -203,6 +203,9 @@ window.DASH = (function () {
     add('库存预警 SKU', low, '低于安全库存或缺货,建议补货', 'stock', '查看', 'b-warning');
     add('草稿调拨单', trDraft, '调拨单需过账才会产生库存流水', 'transfer', '去过账', 'b-neutral');
     add('未过账盘点单', stDraft, '录入实盘数量后过账生成盘盈盘亏', 'stocktake', '去盘点', 'b-info');
+    const curMonth = DB.monthOf(DB.today());
+    const openPeriod = DB.where('period', p => p.status === 'open_period' && p.code < curMonth && ACT.periodActivity(p.code).vouchers > 0).length;
+    add('未结账会计期间', openPeriod, '损益需结转至本年利润 3131 并锁定期间;锁定后该月禁止再过账', 'reports/close', '去结账', 'b-purple');
     return out;
   }
 

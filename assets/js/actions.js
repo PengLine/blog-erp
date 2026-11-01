@@ -4,8 +4,8 @@
  *   出库过账 → 库存流水 + 结转成本凭证
  *   发票过账 → 应收 + 收入/销项税凭证
  *   收款过账 → 核销应收 + 银行存款凭证
- *   收货过账 → 库存流水(移动加权成本)+ 暂估
- *   账单过账 → 应付 + 库存/进项税凭证
+ *   收货过账 → 库存流水(移动加权成本)+ 暂估凭证 借1405/贷2203
+ *   票到清算 → 冲销暂估 + 进项税 + 应付,发票与暂估差异回写存货成本
  * ============================================================ */
 window.ACT = (function () {
 
@@ -29,6 +29,7 @@ window.ACT = (function () {
   }
   /** 写库存流水并同步现量;qty 为带符号数量 */
   function move(prodCode, whCode, qty, unitCost, type, ref, note, toWh) {
+    assertOpen(DB.today(), '出入库');
     const p = DB.find('products', prodCode) || {};
     const no = DB.nextNo('stock_movements');
     const amount = r2(qty * unitCost);
@@ -39,6 +40,21 @@ window.ACT = (function () {
     s.qty += qty;
     /* 金额按流水发生额逐笔累计(与总账 1405 同源),单位成本再由金额反推,避免二次四舍五入产生账实差 */
     s.value = r2(s.value + amount);
+    if (s.qty > 0) s.cost = r2(s.value / s.qty);
+    recalc(s);
+    return no;
+  }
+  /** 只调金额不调数量的库存调整(发票与暂估差异、运费资本化),保证库存子账与总账 1405 同源 */
+  function valueAdj(prodCode, whCode, delta, type, ref, note) {
+    if (!delta) return '';
+    assertOpen(DB.today(), '调整库存成本');
+    const p = DB.find('products', prodCode) || {};
+    const no = DB.nextNo('stock_movements');
+    DB.insert('stock_movements', { no, date: DB.today(), type, product: prodCode, product_name: p.name || prodCode,
+      warehouse: whCode, to_warehouse: '', qty: 0, unit_cost: 0, amount: r2(delta), ref: ref || '',
+      user: DB.currentUser(), note: note || '' });
+    const s = stockRow(prodCode, whCode);
+    s.value = r2(s.value + delta);
     if (s.qty > 0) s.cost = r2(s.value / s.qty);
     recalc(s);
     return no;
@@ -62,6 +78,8 @@ window.ACT = (function () {
 
   /* ---------------- 凭证 ---------------- */
   function journal(date, type, ref, memo, lines) {
+    assertOpen(date);
+    periodRow(DB.monthOf(date));
     const no = DB.nextNo('journal', date);
     let debit = 0;
     lines.forEach((l, i) => {
@@ -81,6 +99,117 @@ window.ACT = (function () {
       acc.balance = r2(bal);
       DB.upsert('gl_account', acc);
     });
+  }
+
+  /* ================= 会计期间 · 期末结转与锁期 ================= */
+
+  /** 取(或按需新建)某月的会计期间:跨月过账时自动开新期间,与真实财务系统一致 */
+  function periodRow(code) {
+    let p = DB.find('period', code);
+    if (p) return p;
+    const [y, m] = String(code).split('-').map(Number);
+    const lastDay = new Date(y, m, 0).getDate();
+    p = DB.insert('period', { code, start: `${code}-01`, end: `${code}-${String(lastDay).padStart(2, '0')}`,
+      status: 'open_period', revenue: 0, expense: 0, profit: 0, retained: 0,
+      close_voucher: '', closed_by: '', closed_at: '', note: '' });
+    return p;
+  }
+  /** 期间锁:锁定期间的任何过账都会被拦截(反结账是唯一解锁入口,需财务审批权限) */
+  function assertOpen(date, what) {
+    const p = DB.find('period', DB.monthOf(date || DB.today()));
+    if (p && p.status === 'locked') {
+      throw new Error(`会计期间 ${p.code} 已结账锁定(${p.closed_by} 于 ${p.closed_at} 结转),不能在该期间${what || '过账'}。如需修正请先在「期末处理」反结账。`);
+    }
+    return true;
+  }
+  /** 某期间的科目发生额(不含结转凭证本身) */
+  function periodActivity(code) {
+    const docs = {};
+    DB.where('journal', j => j.period === code && j.type !== 'close').forEach(j => { docs[j.no] = 1; });
+    const out = {};
+    DB.list('journal_lines').forEach(l => {
+      if (!docs[l.doc]) return;
+      const a = out[l.account] || (out[l.account] = { debit: 0, credit: 0, name: l.account_name });
+      a.debit = r2(a.debit + (l.debit || 0));
+      a.credit = r2(a.credit + (l.credit || 0));
+    });
+    return { byAccount: out, vouchers: Object.keys(docs).length };
+  }
+  /** 期间损益汇总:收入取贷方净额,成本费用取借方净额 */
+  function periodPnL(code) {
+    const act = periodActivity(code);
+    let revenue = 0, cost = 0, expense = 0;
+    DB.list('gl_account').forEach(a => {
+      const x = act.byAccount[a.code]; if (!x) return;
+      const net = r2(x.credit - x.debit);
+      if (a.type === 'revenue') revenue += net;
+      else if (a.type === 'cost') cost += -net;
+      else if (a.type === 'expense') expense += -net;
+    });
+    return { revenue: r2(revenue), cost: r2(cost), expense: r2(expense), totalCost: r2(cost + expense), profit: r2(revenue - cost - expense), act };
+  }
+  /** 生成结转分录:逐笔对冲损益类科目的本期净额,差额全部进 3131 本年利润 */
+  function buildCloseLines(code) {
+    const pnl = periodPnL(code);
+    const lines = [];
+    pnl.act && DB.list('gl_account').forEach(a => {
+      if (['revenue', 'cost', 'expense'].indexOf(a.type) < 0) return;
+      const x = pnl.act.byAccount[a.code]; if (!x) return;
+      const net = r2(x.debit - x.credit);
+      if (Math.abs(net) < .005) return;
+      lines.push(net > 0
+        ? { acc: a.code, credit: net, memo: `结转${a.name}` }
+        : { acc: a.code, debit: -net, memo: `结转${a.name}` });
+    });
+    const toProfit = r2(lines.reduce((s, l) => s + (l.credit || 0), 0));
+    const fromRevenue = r2(lines.reduce((s, l) => s + (l.debit || 0), 0));
+    if (fromRevenue > .004) lines.push({ acc: '3131', credit: fromRevenue, memo: '本年利润—结转收入类' });
+    if (toProfit > .004) lines.push({ acc: '3131', debit: toProfit, memo: '本年利润—结转成本类' });
+    return { lines, pnl };
+  }
+  /** 期末结账:顺序结转 → 生成结转凭证 → 锁定期间 */
+  function closePeriod(code) {
+    const cur = DB.monthOf(DB.today());
+    code = code || cur;
+    assertPerm('period', 'approve');
+    const p = periodRow(code);
+    if (p.status === 'locked') throw new Error(`期间 ${code} 已经结账锁定,无需重复结转。`);
+    if (code >= cur) throw new Error(`${code} 是当前会计期间,月末才可结转结账;请先在新月份继续业务。`);
+    const earlier = DB.list('period')
+      .filter(x => x.code < code && x.status === 'open_period' && periodActivity(x.code).vouchers > 0)
+      .map(x => x.code).sort();
+    if (earlier.length) throw new Error(`更早的期间 ${earlier[0]} 仍有未结转损益,请按月份顺序结账。`);
+    const built = buildCloseLines(code);
+    let no = '';
+    if (built.lines.length) no = journal(p.end, 'close', code, `期末损益结转—${code}(收入 ¥${UI.money(built.pnl.revenue)} / 成本费用 ¥${UI.money(built.pnl.totalCost)})`, built.lines);
+    Object.assign(p, {
+      status: 'locked', revenue: built.pnl.revenue, expense: built.pnl.totalCost, profit: built.pnl.profit,
+      retained: r2(-(DB.find('gl_account', '3131').balance || 0)), close_voucher: no,
+      closed_by: DB.currentUser(), closed_at: DB.today(),
+      note: no ? `本期结转净利润 ¥${UI.money(built.pnl.profit)} 转入本年利润 3131;损益类科目本期余额已清零。`
+        : '本期无损益类发生额,仅锁定期间。'
+    });
+    DB.upsert('period', p);
+    DB.log('财务管理', '期末结账', code, `${no ? '生成结转凭证 ' + no + ',' : ''}本期净利润 ¥${UI.money(built.pnl.profit)},期间锁定`);
+    return no;
+  }
+  /** 反结账:仅允许从最近一个已锁期间往前逐个回退,删掉结转凭证并回补科目余额 */
+  function reopenPeriod(code) {
+    assertPerm('period', 'approve');
+    const p = DB.find('period', code);
+    if (!p) throw new Error(`会计期间 ${code} 不存在。`);
+    if (p.status !== 'locked') throw new Error(`期间 ${code} 尚未结账,无需反结账。`);
+    const later = DB.list('period').filter(x => x.code > code && x.status === 'locked').map(x => x.code).sort();
+    if (later.length) throw new Error(`期间 ${later[later.length - 1]} 晚于 ${code} 且仍处锁定状态,请先反结账较晚的期间。`);
+    const vouchers = DB.where('journal', j => j.period === code && j.type === 'close');
+    const accs = [...new Set(DB.list('journal_lines').filter(l => vouchers.some(v => v.no === l.doc)).map(l => l.account))];
+    vouchers.forEach(v => { DB.setLines('journal_lines', v.no, []); DB.remove('journal', v.no); });
+    updateAccountBalances(accs);
+    Object.assign(p, { status: 'open_period', close_voucher: '', closed_by: '', closed_at: '',
+      revenue: 0, expense: 0, profit: 0, retained: 0, note: '反结账回退,期间重新开放过账。' });
+    DB.upsert('period', p);
+    DB.log('财务管理', '反结账', code, `作废 ${vouchers.length} 张结转凭证,期间 ${code} 重新开放`);
+    return vouchers.length;
   }
 
   /* ---------------- 通用单据工具 ---------------- */
@@ -252,32 +381,71 @@ window.ACT = (function () {
     });
     DB.setLines('po_lines', poNo, poLines);
     DB.insert('gr', { no: gNo, date: DB.today(), po: poNo, supplier: po.supplier, supplier_name: po.supplier_name,
-      warehouse: po.warehouse, amount: r2(costSum), status: 'posted', user: DB.currentUser(), note: '' });
+      warehouse: po.warehouse, amount: r2(costSum), status: 'posted', bill: '', user: DB.currentUser(),
+      note: '货到票未到,按不含税采购成本暂估入账。' });
+    /* 收货即入账:借 库存商品 / 贷 应付暂估(GR/IR),不与供应商对账,票到再清算 */
+    journal(DB.today(), 'gr_accrual', gNo, `采购入库暂估—${po.supplier_name}`, [
+      { acc: '1405', debit: r2(costSum), memo: '货到票未到暂估入库' },
+      { acc: '2203', credit: r2(costSum), memo: '暂估应付—' + po.supplier_name }]);
     const allDone = poLines.every(l => (l.received || 0) >= l.qty);
     po.status = allDone ? 'done' : (poLines.some(l => l.received > 0) ? 'partial' : 'confirmed');
     DB.upsert('purchase_order', po);
     DB.log('采购管理', '过账采购收货单', gNo, `来源 ${poNo},入库成本 ¥${UI.money(costSum)}`);
     return gNo;
   }
-  function createBillFromGR(grNo) {
+  /** 票到清算:冲销 2203 暂估 → 确认进项税与应付,发票价与暂估的差异及资本化运费回写存货成本 */
+  function createBillFromGR(grNo, plan) {
     const gr = DB.find('gr', grNo);
-    if (DB.list('bill').some(b => b.gr === grNo)) throw new Error('该收货单已生成账单');
-    const bNo = DB.nextNo('bill');
+    if (!gr) throw new Error('收货单不存在');
+    if (gr.status === 'settled' || DB.list('bill').some(b => b.gr === grNo)) throw new Error('该收货单已清算,不能重复开票');
+    plan = plan || {};
+    const grLines = DB.lines('gr_lines', grNo);
+    /* 发票数量必须与收货一致:数量差异应走采购退货或补货单,不允许在账单里改 */
+    const lines = grLines.map(l => {
+      const o = (plan.lines || []).find(x => x.product === l.product) || {};
+      const price = o.price === undefined || o.price === null || o.price === '' ? l.price : +o.price;
+      const rate = o.tax_rate === undefined || o.tax_rate === null || o.tax_rate === '' ? (l.tax_rate || 0) : +o.tax_rate;
+      return { product: l.product, product_name: l.product_name, qty: l.qty, price: r2(price), tax_rate: rate,
+        accrue: r2(l.qty * l.price), amount: r2(l.qty * price) };
+    });
+    const goodsNet = r2(lines.reduce((s, l) => s + l.amount, 0));
+    const goodsVat = r2(lines.reduce((s, l) => s + l.amount * l.tax_rate / 100, 0));
+    /* 采购运费按准则资本化计入存货成本 */
+    const freight = r2(+plan.freight || 0);
+    const freightRate = plan.freight_rate === undefined || plan.freight_rate === null || plan.freight_rate === '' ? 9 : +plan.freight_rate;
+    const freightVat = r2(freight * freightRate / 100);
+    const net = r2(goodsNet + freight), vat = r2(goodsVat + freightVat), total = r2(net + vat);
+    const accrual = r2(gr.amount || 0), diff = r2(net - accrual);
     const sup = DB.find('suppliers', gr.supplier) || {};
-    const terms = sup.payment_terms || 'NET30';
     const daysMap = { NET60: 60, NET45: 45, NET30: 30, PRE50: 15, PRE100: 0, COD: 0 };
-    const due = DB.addDays(DB.today(), daysMap[terms] || 30);
-    const lines = DB.lines('gr_lines', grNo);
-    const net = r2(lines.reduce((s, l) => s + l.qty * l.price, 0));
-    const vat = r2(lines.reduce((s, l) => s + l.qty * l.price * (l.tax_rate || 0) / 100, 0));
-    const total = r2(net + vat);
+    const bNo = DB.nextNo('bill');
+    const due = DB.addDays(DB.today(), daysMap[sup.payment_terms || 'NET30'] || 30);
+
     DB.insert('bill', { no: bNo, date: DB.today(), supplier: gr.supplier, supplier_name: gr.supplier_name, po: gr.po, gr: grNo,
-      due_date: due, status: 'open', total, paid: 0, balance: total, note: '' });
-    lines.forEach((l, i) => DB.insert('bill_lines', Object.assign({}, l, { doc: bNo, lineno: i + 1 })));
-    journal(DB.today(), 'ap_bill', bNo, `采购账单确认—${gr.supplier_name}`, [
-      { acc: '1405', debit: net, memo: '采购入库' },
-      { acc: '2221', debit: vat, memo: '进项税额' }, { acc: '2202', credit: total, memo: '应付—' + gr.supplier_name }]);
-    DB.log('采购管理', '生成采购账单', bNo, `价税合计 ¥${UI.money(total)}`);
+      kind: 'goods', due_date: due, status: 'open', total, net, vat, accrual, paid: 0, balance: total,
+      note: diff ? `冲销暂估 ¥${UI.money(accrual)};发票价与运费差异 ¥${UI.money(diff)} 已调整存货成本` : `冲销暂估 ¥${UI.money(accrual)}` });
+    lines.forEach((l, i) => DB.insert('bill_lines', { doc: bNo, lineno: i + 1, product: l.product, product_name: l.product_name,
+      qty: l.qty, price: l.price, amount: l.amount, tax_rate: l.tax_rate, memo: l.accrue !== l.amount ? '暂估 ¥' + UI.money(l.accrue) : '' }));
+    if (freight) DB.insert('bill_lines', { doc: bNo, lineno: lines.length + 1, product: '', product_name: '运输装卸费(计入存货成本)',
+      qty: 1, price: freight, amount: freight, tax_rate: freightRate, memo: plan.freight_memo || '供应商代垫运费' });
+
+    /* 差异 + 运费按行价值分摊回库存子账,末行兜住尾差,保证 库存子账 = 总账 1405 */
+    const base = goodsNet || 1;
+    let booked = 0;
+    lines.forEach((l, i) => {
+      const d = i === lines.length - 1 ? r2(diff - booked) : r2(l.amount - l.accrue + freight * (l.amount / base));
+      booked = r2(booked + d);
+      valueAdj(l.product, gr.warehouse, d, 'bill_diff', bNo, d >= 0 ? '发票差异/运费资本化调增存货' : '发票差异调减存货');
+    });
+
+    const jl = [{ acc: '2203', debit: accrual, memo: '冲销到货暂估' }, { acc: '2221', debit: vat, memo: '进项税额' }];
+    jl.push(diff >= 0 ? { acc: '1405', debit: diff, memo: '发票差异与运费调整存货成本' }
+                      : { acc: '1405', credit: -diff, memo: '发票差异与运费调整存货成本' });
+    jl.push({ acc: '2202', credit: total, memo: '应付—' + gr.supplier_name });
+    journal(DB.today(), 'ap_bill', bNo, '票到清算—' + gr.supplier_name, jl);
+
+    gr.status = 'settled'; gr.bill = bNo; DB.upsert('gr', gr);
+    DB.log('采购管理', '票到清算生成采购账单', bNo, `价税合计 ¥${UI.money(total)},冲销暂估 ¥${UI.money(accrual)},差异 ¥${UI.money(diff)}`);
     return bNo;
   }
   function createPayment(billNo, amount, method, note) {
@@ -791,7 +959,7 @@ window.ACT = (function () {
     DB.insert('bill', {
       no: bNo, date: DB.today(), supplier: t.processor, supplier_name: t.processor_name,
       po: '', gr: '', os: no, kind: 'fee', due_date: DB.addDays(DB.today(), daysMap[terms] || 30),
-      status: 'open', total, paid: 0, balance: total, note: `委外加工费—${t.process_type || '通用'} ${qty} 件`
+      status: 'open', total, net: feeNet, vat: vat, accrual: 0, paid: 0, balance: total, note: `委外加工费—${t.process_type || '通用'} ${qty} 件`
     });
     DB.insert('bill_lines', { doc: bNo, lineno: 1, product: t.output_product, product_name: prod.name || t.output_product,
       qty, price: t.unit_fee, amount: feeNet, tax_rate: taxRate, memo: '加工费' });
@@ -937,7 +1105,7 @@ window.ACT = (function () {
       if (!sup) throw new Error('没有可用的供应商档案,无法挂账维修费');
       const bNo = DB.nextNo('bill');
       DB.insert('bill', { no: bNo, date: DB.today(), supplier: sup.code, supplier_name: sup.name, po: '', gr: '', os: '',
-        kind: 'fee', due_date: DB.addDays(DB.today(), 30), status: 'open', total: cost, paid: 0, balance: cost,
+        kind: 'fee', due_date: DB.addDays(DB.today(), 30), status: 'open', total: cost, net: cost, vat: 0, accrual: 0, paid: 0, balance: cost,
         note: `售后维修费暂挂应付,应追偿—${no}` });
       DB.insert('bill_lines', { doc: bNo, lineno: 1, product: p.code || '', product_name: p.name || '维修工时',
         qty: 1, price: cost, amount: cost, tax_rate: 0, memo: '维修工时费' });
@@ -1073,5 +1241,6 @@ window.ACT = (function () {
     confirmOS, cancelOS, issueOS, receiveOS,
     submitRMA, decideRMA, receiveRMA, creditRMA, refundRMA, repairRMA, closeRMA,
     requestSOChange, applySOChange, closeSO,
+    periodRow, assertOpen, periodActivity, periodPnL, buildCloseLines, closePeriod, reopenPeriod,
     PERM: { can, grant, grantAll, assertPerm, roleOfUser, currentRole, ACTIONS: PERM_ACTIONS } };
 })();

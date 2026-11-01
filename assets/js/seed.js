@@ -242,13 +242,24 @@ window.SEED = (function () {
       });
     }
 
+    /** 只调金额不调数量的流水:票到清算差异与运费资本化回写库存子账 */
+    function valueMovement(date, type, product, warehouse, amount, ref, user, note) {
+      mvIdx++;
+      push('stock_movements', {
+        no: 'MV' + date.slice(0, 4) + '-' + api.pad(5000 + mvIdx, 5), date, type,
+        product: product.code, product_name: product.name, warehouse, to_warehouse: '',
+        qty: 0, unit_cost: 0, amount: money(amount), ref, user: user || '钱雅诃', note: note || ''
+      });
+    }
+
     /* ---------- 会计凭证 ---------- */
     const ACCOUNTS = [
       ['1001', '库存现金', 'asset', 'debit'], ['1002', '银行存款—基本户(招商银行杭州分行)', 'asset', 'debit'],
       ['1122', '应收账款', 'asset', 'debit'], ['1221', '预付账款', 'asset', 'debit'],
       ['1405', '库存商品', 'asset', 'debit'], ['1408', '委托加工物资', 'asset', 'debit'],
       ['1601', '固定资产', 'asset', 'debit'], ['1602', '累计折旧', 'asset', 'credit'],
-      ['2202', '应付账款', 'liability', 'credit'], ['2221', '应交税费', 'liability', 'credit'], ['2211', '应付职工薪酬', 'liability', 'credit'],
+      ['2202', '应付账款', 'liability', 'credit'], ['2203', '应付暂估(GR/IR)', 'liability', 'credit'],
+      ['2221', '应交税费', 'liability', 'credit'], ['2211', '应付职工薪酬', 'liability', 'credit'],
       ['4001', '主营业务收入', 'revenue', 'credit'], ['4002', '其他业务收入', 'revenue', 'credit'],
       ['5001', '主营业务成本', 'cost', 'debit'], ['5401', '其他成本', 'cost', 'debit'],
       ['6601', '销售费用', 'expense', 'debit'], ['6602', '管理费用', 'expense', 'debit'], ['6711', '营业外支出', 'expense', 'debit'],
@@ -438,21 +449,50 @@ window.SEED = (function () {
           });
           T.po_lines.forEach(l => { if (l.doc === no) { const src = lines.find(x => x.product === l.product); if (src) l.received = src.received; } });
           push('gr', { no: gNo, date: gDate, po: no, supplier: sup.code, supplier_name: sup.name, warehouse: wh,
-            amount: money(costSum), status: 'posted', user: '何砚舟', note: ratio < 1 ? '部分到货,余量在途。' : '' });
+            amount: money(costSum), status: 'posted', bill: '', user: '何砚舟',
+            note: ratio < 1 ? '部分到货,余量在途;已到货部分按不含税成本暂估。' : '货到票未到,按不含税成本暂估入账。' });
           lines.forEach(l => push('gr_lines', { doc: gNo, lineno: lines.indexOf(l) + 1, product: l.product, product_name: l.product_name, qty: l.received, price: l.price, amount: money(l.received * l.price), tax_rate: l.tax_rate }));
+          /* 收货即入账:借 库存商品 / 贷 应付暂估(GR/IR),票到再清算 */
+          journal(gDate, 'gr_accrual', gNo, '采购入库暂估—' + sup.name, [
+            { acc: '1405', debit: money(costSum), memo: '货到票未到暂估入库' },
+            { acc: '2203', credit: money(costSum), memo: '暂估应付—' + sup.name }]);
           if (status === 'done') {
+            /* 票到清算:约三成发票单价与暂估价有出入,三成带供应商代垫运杂费 */
+            const factor = R.chance(.3) ? 1 + (R.next() - .5) * .05 : 1;
+            const freight = R.chance(.3) ? money(180 + R.next() * 2400) : 0;
             const bDate = addDays(gDate, R.int(0, 6)) > today ? today : addDays(gDate, R.int(0, 6));
             const bNo = docNo('PB', 'bill', bDate);
             const termsDays = sup.payment_terms === 'NET60' ? 60 : sup.payment_terms === 'NET45' ? 45 : sup.payment_terms === 'PRE50' ? 15 : 30;
             const due = addDays(bDate, termsDays);
-            const amount = money(lines.reduce((s, l) => s + l.received * l.price * (1 + l.tax_rate / 100), 0));
-            push('bill', { no: bNo, date: bDate, supplier: sup.code, supplier_name: sup.name, po: no, gr: gNo,
-              due_date: due, status: due < today && R.chance(.45) ? 'overdue' : 'open', total: amount, paid: 0, balance: amount, note: '' });
-            lines.forEach(l => push('bill_lines', { doc: bNo, lineno: lines.indexOf(l) + 1, product: l.product, product_name: l.product_name, qty: l.received, price: l.price, amount: money(l.received * l.price), tax_rate: l.tax_rate }));
-            const net = money(lines.reduce((s, l) => s + l.received * l.price, 0));
-            const vat = money(amount - net);
-            journal(bDate, 'ap_bill', bNo, '采购入库暂估/账单确认—' + sup.name, [
-              { acc: '1405', debit: net }, { acc: '2221', debit: vat, memo: '进项税额' }, { acc: '2202', credit: amount, memo: '应付—' + sup.name }]);
+            const bl = lines.map(l => ({ product: l.product, product_name: l.product_name, qty: l.received, price: money(l.price * factor), tax_rate: l.tax_rate }));
+            const goodsNet = money(bl.reduce((s, l) => s + l.qty * l.price, 0));
+            const goodsVat = money(bl.reduce((s, l) => s + l.qty * l.price * l.tax_rate / 100, 0));
+            const net = money(goodsNet + freight);
+            const vat = money(goodsVat + freight * .09);
+            const amount = money(net + vat);
+            const accrual = money(costSum), diff = money(net - accrual);
+            push('bill', { no: bNo, date: bDate, supplier: sup.code, supplier_name: sup.name, po: no, gr: gNo, kind: 'goods',
+              due_date: due, status: due < today && R.chance(.45) ? 'overdue' : 'open', total: amount, net, vat, accrual, paid: 0, balance: amount,
+              note: diff ? `冲销暂估 ¥${money(accrual)};发票价与运费差异 ¥${money(diff)} 已调整存货成本` : `冲销暂估 ¥${money(accrual)}` });
+            bl.forEach((l, i) => push('bill_lines', { doc: bNo, lineno: i + 1, product: l.product, product_name: l.product_name,
+              qty: l.qty, price: l.price, amount: money(l.qty * l.price), tax_rate: l.tax_rate,
+              memo: Math.abs(l.price - lines[i].price) > .004 ? '暂估 ¥' + money(lines[i].price) : '' }));
+            if (freight) push('bill_lines', { doc: bNo, lineno: bl.length + 1, product: '', product_name: '运输装卸费(计入存货成本)',
+              qty: 1, price: freight, amount: freight, tax_rate: 9, memo: '供应商代垫运费' });
+            /* 差异 + 运费按行分摊回库存子账,末行兜尾差 */
+            let booked = 0;
+            bl.forEach((l, i) => {
+              const raw = money(l.qty * l.price - lines[i].received * lines[i].price + freight * ((l.qty * l.price) / (goodsNet || 1)));
+              const d = i === bl.length - 1 ? money(diff - booked) : raw;
+              booked = money(booked + d);
+              if (Math.abs(d) > .004) valueMovement(bDate, 'bill_diff', PRODUCTS.find(x => x.code === l.product) || { code: l.product, name: l.product_name },
+                wh, d, bNo, '钱雅诃', d > 0 ? '票到清算:差异/运费调增存货成本' : '票到清算:差异调减存货成本');
+            });
+            journal(bDate, 'ap_bill', bNo, '票到清算—' + sup.name, [
+              { acc: '2203', debit: accrual, memo: '冲销到货暂估' }, { acc: '2221', debit: vat, memo: '进项税额' },
+              diff >= 0 ? { acc: '1405', debit: diff, memo: '发票差异与运费调整存货成本' } : { acc: '1405', credit: -diff, memo: '发票差异与运费调整存货成本' },
+              { acc: '2202', credit: amount, memo: '应付—' + sup.name }]);
+            T.gr.forEach(g => { if (g.no === gNo) { g.status = 'settled'; g.bill = bNo; } });
           }
         }
       }
@@ -567,17 +607,23 @@ window.SEED = (function () {
         movement(gDate, 'po_receipt', p, wh, l.received, l.price, gNo, '何砚舟', '', '采购到货入库');
         p.cost = money((p.cost + l.price) / 2);
       });
-      push('gr', { no: gNo, date: gDate, po: no, supplier: sup.code, supplier_name: sup.name, warehouse: wh, amount: net, status: 'posted', user: '何砚舟', note: '' });
+      push('gr', { no: gNo, date: gDate, po: no, supplier: sup.code, supplier_name: sup.name, warehouse: wh, amount: net,
+        status: 'posted', bill: '', user: '何砚舟', note: '货到票未到,按不含税成本暂估入账。' });
       lines.forEach((l, i) => push('gr_lines', { doc: gNo, lineno: i + 1, product: l.product, product_name: l.product_name, qty: l.received, price: l.price, amount: money(l.received * l.price), tax_rate: l.tax_rate }));
+      journal(gDate, 'gr_accrual', gNo, '采购入库暂估—' + sup.name, [
+        { acc: '1405', debit: net, memo: '货到票未到暂估入库' }, { acc: '2203', credit: net, memo: '暂估应付—' + sup.name }]);
       const bDate = notFuture(addDays(gDate, R.int(0, 5)));
       const bNo = docNo('PB', 'bill', bDate);
       const td = sup.payment_terms === 'NET60' ? 60 : sup.payment_terms === 'NET45' ? 45 : sup.payment_terms === 'PRE50' ? 15 : 30;
       const due = addDays(bDate, td);
       push('bill', { no: bNo, date: bDate, supplier: sup.code, supplier_name: sup.name, po: no, gr: gNo, os: '', kind: 'goods',
-        due_date: due, status: due < today && R.chance(.4) ? 'overdue' : 'open', total, paid: 0, balance: total, note: '' });
+        due_date: due, status: due < today && R.chance(.4) ? 'overdue' : 'open', total, net, vat: money(total - net), accrual: net,
+        paid: 0, balance: total, note: '冲销暂估 ¥' + money(net) });
       lines.forEach((l, i) => push('bill_lines', { doc: bNo, lineno: i + 1, product: l.product, product_name: l.product_name, qty: l.received, price: l.price, amount: money(l.received * l.price), tax_rate: l.tax_rate }));
-      journal(bDate, 'ap_bill', bNo, '采购入库账单确认—' + sup.name, [
-        { acc: '1405', debit: net }, { acc: '2221', debit: money(total - net), memo: '进项税额' }, { acc: '2202', credit: total, memo: '应付—' + sup.name }]);
+      journal(bDate, 'ap_bill', bNo, '票到清算—' + sup.name, [
+        { acc: '2203', debit: net, memo: '冲销到货暂估' }, { acc: '2221', debit: money(total - net), memo: '进项税额' },
+        { acc: '2202', credit: total, memo: '应付—' + sup.name }]);
+      T.gr.forEach(g => { if (g.no === gNo) { g.status = 'settled'; g.bill = bNo; } });
       return { po: no, gr: gNo, bill: bNo, total: total };
     }
     /** 付款(镜像 ACT.createPayment) */
@@ -949,7 +995,7 @@ window.SEED = (function () {
       push('bill', {
         no: bNo, date: rDate, supplier: proc.code, supplier_name: proc.name, po: '', gr: '', os: no, kind: 'fee',
         due_date: addDays(rDate, 30), status: addDays(rDate, 30) < today ? 'overdue' : 'open',
-        total: money(feeNet + vat), paid: 0, balance: money(feeNet + vat),
+        total: money(feeNet + vat), net: feeNet, vat: vat, accrual: 0, paid: 0, balance: money(feeNet + vat),
         note: '委外加工费—' + (SCHEMA.entities.processors.fields.process_type.opts[proc.process_type] || '通用') + ' ' + rq + ' 件'
       });
       push('bill_lines', { doc: bNo, lineno: 1, product: out.code, product_name: out.name, qty: rq, price: money(o.fee), amount: feeNet, tax_rate: out.tax_rate || 13, memo: '加工费' });
@@ -1020,7 +1066,7 @@ window.SEED = (function () {
           const bNo = docNo('PB', 'bill', rDate);
           push('bill', { no: bNo, date: rDate, supplier: sup.code, supplier_name: sup.name, po: '', gr: '', os: '', kind: 'fee',
             due_date: addDays(rDate, 30), status: addDays(rDate, 30) < today ? 'overdue' : 'open',
-            total: cost, paid: 0, balance: cost, note: '售后维修费暂挂应付,应向服务商追偿—' + no });
+            total: cost, net: cost, vat: 0, accrual: 0, paid: 0, balance: cost, note: '售后维修费暂挂应付,应向服务商追偿—' + no });
           push('bill_lines', { doc: bNo, lineno: 1, product: p0.code, product_name: p0.name, qty: 1, price: cost, amount: cost, tax_rate: 0, memo: '维修工时费' });
           journal(rDate, 'rma_repair', no, '售后维修费—' + so.customer_name,
             [{ acc: '6601', debit: cost, memo: '先行承担维修费' }, { acc: '2202', credit: cost, memo: '应追偿服务商,暂挂应付 ' + bNo }]);
@@ -1179,7 +1225,7 @@ window.SEED = (function () {
       const p = T.products.find(x => x.code === s.product) || {};
       const reserved = 0;
       push('stock', { _id: s.product + '-' + s.warehouse, product: s.product, product_name: p.name || s.product, warehouse: s.warehouse,
-        qty: s.qty, reserved, available: s.qty - reserved, cost: p.cost || 0, value: money(s.qty * (p.cost || 0)),
+        qty: s.qty, reserved, available: s.qty - reserved, value: money(s.amount), cost: s.qty > 0 ? money(s.amount / s.qty) : (p.cost || 0),
         status: s.qty <= 0 ? 'shortage' : (s.qty < (p.safety_qty || 0) ? 'low' : 'normal') });
     });
     // 已确认未出库订单占用量
@@ -1187,7 +1233,6 @@ window.SEED = (function () {
       const held = T.sales_order.filter(o => o.status === 'confirmed' && o.warehouse === s.warehouse)
         .reduce((sum, o) => sum + T.so_lines.filter(l => l.doc === o.no && l.product === s.product).reduce((a, l) => a + (l.qty - (l.delivered || 0)), 0), 0);
       s.reserved = Math.min(s.qty, held); s.available = s.qty - s.reserved;
-      s.value = money(s.qty * s.cost);
       s.status = s.qty <= 0 ? 'shortage' : (s.available < (T.products.find(p => p.code === s.product) || {}).safety_qty ? 'low' : s.status);
     });
 
@@ -1199,18 +1244,29 @@ window.SEED = (function () {
       { acc: '1405', debit: openStock, memo: '期初库存商品结转' },
       { acc: '3001', credit: money(openCash + openStock), memo: '实收资本' }], '陈立群');
 
+    /* 存货账实核对:库存子账金额逐笔来自流水、流水逐笔对应凭证,不再需要事后差异调整 */
     const bookValue = money(T.stock.reduce((s, r) => s + (r.value || 0), 0));
     const glValue = money(T.journal_lines.filter(l => l.account === '1405').reduce((s, l) => s + (l.debit || 0) - (l.credit || 0), 0));
-    const variance = money(bookValue - glValue);
-    if (Math.abs(variance) > 1) journal(today, 'manual', 'ADJ-VAR', '发出存货成本差异结转(标准成本与当批实际进价)', [
-      variance > 0 ? { acc: '1405', debit: variance, memo: '存货账实核对' } : { acc: '1405', credit: -variance, memo: '存货账实核对' },
-      variance > 0 ? { acc: '5001', credit: variance, memo: '冲减主营业务成本' } : { acc: '5001', debit: -variance, memo: '追加主营业务成本' }], '钱雅诃');
+    const irBook = money(T.gr.filter(g => g.status !== 'settled').reduce((s, g) => s + (g.amount || 0), 0));
+    const glIR = money(T.journal_lines.filter(l => l.account === '2203').reduce((s, l) => s + (l.credit || 0) - (l.debit || 0), 0));
+    if (Math.abs(bookValue - glValue) > .05) console.warn('[seed] 库存子账与总账 1405 不平:', bookValue, glValue);
+    if (Math.abs(irBook - glIR) > .05) console.warn('[seed] 未清算收货与应付暂估 2203 不平:', irBook, glIR);
 
     /* ---------- 会计科目余额 ---------- */
     T.gl_account = ACCOUNTS.map(a => ({ code: a[0], name: a[1], type: a[2], direction: a[3], balance: 0 }));
     const bal = {};
     T.journal_lines.forEach(l => { bal[l.account] = (bal[l.account] || 0) + (l.debit || 0) - (l.credit || 0); });
     T.gl_account.forEach(a => a.balance = money(bal[a.code] || 0));
+
+    /* ---------- 会计期间:按凭证实际覆盖的月份开立,演示数据全部留待期末结转 ---------- */
+    const pCodes = [...new Set(T.journal.map(j => j.period || String(j.date).slice(0, 7)))];
+    pCodes.push(String(today).slice(0, 7));
+    [...new Set(pCodes)].sort().forEach(code => {
+      const [y, m] = code.split('-').map(Number);
+      push('period', { code, start: code + '-01', end: code + '-' + api.pad(new Date(y, m, 0).getDate(), 2),
+        status: 'open_period', revenue: 0, expense: 0, profit: 0, retained: 0,
+        close_voucher: '', closed_by: '', closed_at: '', note: '未结转期间,损益类科目余额仍在账上。' });
+    });
 
     /* ---------- 操作日志 ---------- */
     const acts = [
@@ -1234,6 +1290,16 @@ window.SEED = (function () {
     /* ---------- 清理辅助字段 ---------- */
     T.products.forEach(p => { delete p._baseQty; delete p._cat; });
     T.suppliers.forEach(s => delete s._cat);
+
+    /* ---------- 编号续接:凭证与库存流水用了独立号段,需回写序列,避免新增单据号码倒挂 ---------- */
+    [['journal', 'JE'], ['stock_movements', 'MV']].forEach(([key]) => {
+      const maxByYear = {};
+      T[key].forEach(r => {
+        const y = String(r.no).slice(2, 6), n = parseInt(String(r.no).slice(-5), 10);
+        if (n) maxByYear[y] = Math.max(maxByYear[y] || 0, n);
+      });
+      Object.keys(maxByYear).forEach(y => api.bumpSeq(key, y + '-01-01', maxByYear[y]));
+    });
 
     return true;
   }

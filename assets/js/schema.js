@@ -19,9 +19,9 @@ window.SCHEMA = (function () {
     rejected: { l: '已驳回', c: 'b-danger' },
     converted: { l: '已转采购', c: 'b-purple' },
     posted: { l: '已过账', c: 'b-success' },
-    open: { l: '未收款', c: 'b-danger' },
-    partial_paid: { l: '部分收款', c: 'b-warning' },
-    paid: { l: '已结清', c: 'b-success' },
+    open: { l: '未收款', ap: '未付款', c: 'b-danger' },
+    partial_paid: { l: '部分收款', ap: '部分付款', c: 'b-warning' },
+    paid: { l: '已结清', ap: '已付清', c: 'b-success' },
     overdue: { l: '逾期', c: 'b-danger' },
     shortage: { l: '缺货', c: 'b-danger' },
     normal: { l: '正常', c: 'b-success' },
@@ -47,6 +47,12 @@ window.SCHEMA = (function () {
     refunded: { l: '已退款', c: 'b-purple' },
     exchanged: { l: '已换货', c: 'b-success' },
     repairing: { l: '维修中', c: 'b-warning' },
+    /* 暂估清算 / 质检 / 关账 */
+    settled: { l: '已清算', c: 'b-success' },
+    to_check: { l: '待质检', c: 'b-warning' },
+    rejected_qty: { l: '拒收退货', c: 'b-danger' },
+    locked: { l: '已关账', c: 'b-neutral' },
+    open_period: { l: '未关账', c: 'b-success' },
   };
 
   const YESNO = { y: '是', n: '否' };
@@ -159,7 +165,8 @@ window.SCHEMA = (function () {
         type: { t: 'select', l: '类型', opts: {
           po_receipt: '采购入库', sales_delivery: '销售出库', so_return: '销售退货入库', po_return: '采购退货',
           transfer: '库存调拨', stocktake_plus: '盘盈', stocktake_minus: '盘亏', manual: '手工调整',
-          os_issue: '委外发料', os_receive: '委外收回'
+          os_issue: '委外发料', os_receive: '委外收回', bill_diff: '暂估差异调整',
+          iqc_hold: '收货待检', iqc_pass: '质检转正品', iqc_reject: '质检拒收'
         }, badge: 0 },
         product: { t: 'ref', l: '物料', ref: 'products', key: 'code' },
         product_name: { t: 'text', l: '商品名称' },
@@ -342,8 +349,9 @@ window.SCHEMA = (function () {
         supplier: { t: 'ref', l: '供应商', ref: 'suppliers', key: 'code' },
         supplier_name: { t: 'text', l: '供应商名称' },
         warehouse: { t: 'ref', l: '收货仓', ref: 'warehouses', key: 'code' },
-        amount: { t: 'money', l: '入库金额(成本)', sum: true },
-        status: { t: 'select', l: '状态', opts: { posted: 1 }, badge: 1 },
+        amount: { t: 'money', l: '入库金额(暂估成本)', sum: true },
+        status: { t: 'select', l: '暂估状态', opts: { posted: 1, settled: 1 }, badge: 1 },
+        bill: { t: 'ref', l: '清算账单', ref: 'bill', key: 'no' },
         user: { t: 'text', l: '仓管员', hide: true },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
       }
@@ -362,6 +370,9 @@ window.SCHEMA = (function () {
         due_date: { t: 'date', l: '付款到期日' },
         status: { t: 'select', l: '状态', opts: { open: 1, partial_paid: 1, paid: 1, overdue: 1 }, badge: 1, ro: 1 },
         total: { t: 'money', l: '价税合计', sum: true },
+        net: { t: 'money', l: '不含税金额', sum: true },
+        vat: { t: 'money', l: '进项税额', sum: true },
+        accrual: { t: 'money', l: '冲销暂估', sum: true },
         paid: { t: 'money', l: '已付金额', sum: true },
         balance: { t: 'money', l: '未付余额', sum: true },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
@@ -408,6 +419,24 @@ window.SCHEMA = (function () {
         balance: { t: 'money', l: '本期余额(借正贷负)', sum: true, ro: 1 },
       }
     },
+    period: {
+      label: '会计期间', table: '会计期间 (fa_period)', pk: 'code', icon: 'book', readonly: true,
+      statusField: 'status', hideNew: true,
+      fields: {
+        code: { t: 'code', l: '期间' },
+        start: { t: 'date', l: '期初日期' },
+        end: { t: 'date', l: '期末日期' },
+        status: { t: 'select', l: '结账状态', opts: { open_period: 1, locked: 1 }, badge: 1, ro: 1 },
+        revenue: { t: 'money', l: '本期收入', sum: true, ro: 1 },
+        expense: { t: 'money', l: '本期成本与费用', sum: true, ro: 1 },
+        profit: { t: 'money', l: '本期净利润', sum: true, ro: 1 },
+        retained: { t: 'money', l: '结转后累计利润', sum: true, ro: 1 },
+        close_voucher: { t: 'ref', l: '结转凭证', ref: 'journal', key: 'no', ro: 1 },
+        closed_by: { t: 'text', l: '结账人', ro: 1 },
+        closed_at: { t: 'date', l: '结账日期', ro: 1 },
+        note: { t: 'textarea', l: '备注', full: 1, ro: 1 },
+      }
+    },
     journal: {
       label: '记账凭证', table: '记账凭证 (fa_journal)', pk: 'no', prefix: 'JE', icon: 'book', readonly: true,
       fields: {
@@ -415,7 +444,8 @@ window.SCHEMA = (function () {
         date: { t: 'date', l: '凭证日期' },
         period: { t: 'text', l: '会计期间', hide: true },
         type: { t: 'select', l: '业务类型', opts: { sales_invoice: '销售开票', sales_delivery: '销售出库(结转成本)', sales_receipt: '销售收款',
-          po_receipt: '采购入库', ap_bill: '应付挂账', ap_payment: '付款', stock_adjust: '库存调整', manual: '手工凭证',
+          po_receipt: '采购入库', gr_accrual: '收货暂估(GR/IR)', ap_bill: '票到清算', ap_payment: '付款', stock_adjust: '库存调整', manual: '手工凭证',
+          close: '期末损益结转',
           os_issue: '委外发料', os_receive: '委外收回', os_fee: '加工费挂账',
           rma_return: '售后退货入库', rma_credit: '售后红冲', rma_refund: '售后退款', rma_repair: '售后维修费' }, badge: 0 },
         ref: { t: 'text', l: '关联单据' },
@@ -747,6 +777,7 @@ window.SCHEMA = (function () {
     { key: 'stock', label: '库存管理', entity: 'stock' },
     { key: 'rma', label: '售后管理', entity: 'rma' },
     { key: 'journal', label: '财务凭证', entity: 'journal' },
+    { key: 'period', label: '期末结账', entity: 'period' },
     { key: 'reports', label: '报表分析', entity: 'reports' },
     { key: 'role', label: '权限管理', entity: 'role' },
     { key: 'activity', label: '操作日志', entity: 'activity' },

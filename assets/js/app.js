@@ -51,6 +51,7 @@
     { group: '财务管理', items: [
       { id: 'gl_account', label: '会计科目余额', icon: 'book' },
       { id: 'journal', label: '记账凭证', icon: 'book' },
+      { id: 'reports/close', label: '期末处理与结账', icon: 'lock' },
       { id: 'reports/ar', label: '应收账龄分析', icon: 'chart' },
       { id: 'reports/ap', label: '应付账龄分析', icon: 'chart' },
     ] },

@@ -23,13 +23,14 @@ window.LIST = (function () {
     invoice: ['no', 'date', 'customer_name', 'due_date', 'total', 'paid', 'balance', 'status'],
     purchase_req: ['no', 'date', 'dept', 'requester', 'need_date', 'amount', 'status'],
     purchase_order: ['no', 'date', 'supplier_name', 'warehouse', 'expected_date', 'buyer', 'total', 'status'],
-    gr: ['no', 'date', 'po', 'supplier_name', 'warehouse', 'amount', 'status'],
-    bill: ['no', 'date', 'supplier_name', 'gr', 'due_date', 'total', 'paid', 'balance', 'status'],
+    gr: ['no', 'date', 'po', 'supplier_name', 'warehouse', 'amount', 'bill', 'status'],
+    bill: ['no', 'date', 'supplier_name', 'gr', 'due_date', 'total', 'net', 'vat', 'paid', 'balance', 'status'],
     transfer: ['no', 'date', 'from_wh', 'to_wh', 'status', 'user', 'note'],
     stocktake: ['no', 'date', 'warehouse', 'diff_lines', 'diff_amount', 'status', 'user'],
     payment: ['no', 'date', 'supplier_name', 'bill', 'amount', 'method', 'status'],
     receipt: ['no', 'date', 'customer_name', 'invoice', 'amount', 'method', 'status'],
     journal: ['no', 'date', 'type', 'ref', 'memo', 'debit', 'status'],
+    period: ['code', 'start', 'end', 'status', 'revenue', 'expense', 'profit', 'retained', 'close_voucher', 'closed_by', 'closed_at'],
     gl_account: ['code', 'name', 'type', 'direction', 'balance'],
     activity: ['time', 'user', 'module', 'action', 'ref', 'detail'],
     rfq: ['no', 'date', 'title', 'buyer', 'need_date', 'quote_lines', 'amount', 'saving', 'status'],
@@ -89,7 +90,7 @@ window.LIST = (function () {
       case 'date': return `<span class="nowrap">${dateCN(row[key])}</span>`;
       case 'datetime': return `<span class="nowrap muted small">${esc(row[key])}</span>`;
       case 'code': return `<span class="mono">${esc(row[key])}</span>`;
-      case 'select': return f.badge ? badge(row[key]) : esc(optText(f, row[key]));
+      case 'select': return f.badge ? badge(row[key], entity === 'bill' ? 'ap' : '') : esc(optText(f, row[key]));
       case 'ref': return cellRef(f.ref, row[key]);
       default: return esc(row[key]);
     }
@@ -209,7 +210,7 @@ window.LIST = (function () {
     <div class="card">
       <div class="toolbar">
         ${UI.toolbarSearch(s.q)}
-        ${statusOpts.length ? UI.chips([{ v: '', l: '全部' }].concat(statusOpts.map(v => ({ v, l: SCHEMA.STATUS[v] ? SCHEMA.STATUS[v].l : v }))), s.status, counts) : ''}
+        ${statusOpts.length ? UI.chips([{ v: '', l: '全部' }].concat(statusOpts.map(v => ({ v, l: UI.stLabel(v, entity === 'bill' ? 'ap' : '') }))), s.status, counts) : ''}
         ${(FILTERS[entity] || []).map(f => filterSelect(entity, f, s)).join('')}
         ${(FILTERS[entity] || []).length || statusOpts.length ? `<button class="btn ghost sm" data-clear style="margin-left:auto">${icon('refresh')}重置筛选</button>` : ''}
       </div>
@@ -236,7 +237,7 @@ window.LIST = (function () {
   function filterSelect(entity, f, s) {
     let opts;
     if (f.entity) opts = DB.list(f.entity).map(r => { const pk = SCHEMA.entities[f.entity].pk; return [r[pk], r.name || r[pk]]; });
-    else { const FO = typeof f.opts === 'function' ? f.opts() : (f.opts || {}); opts = Object.keys(FO).map(k => [k, typeof FO[k] === 'object' ? (SCHEMA.STATUS[k] ? SCHEMA.STATUS[k].l : k) : FO[k]]); }
+    else { const FO = typeof f.opts === 'function' ? f.opts() : (f.opts || {}); opts = Object.keys(FO).map(k => [k, typeof FO[k] === 'object' ? UI.stLabel(k, entity === 'bill' ? 'ap' : '') : FO[k]]); }
     return `<div class="field-inline">${esc(f.label)}<select data-filter="${f.k}" style="width:auto;min-width:118px"><option value="">全部</option>${opts.map(o => `<option value="${esc(o[0])}" ${String(s.filters[f.k]) === String(o[0]) ? 'selected' : ''}>${esc(o[1])}</option>`).join('')}</select></div>`;
   }
 
@@ -245,6 +246,14 @@ window.LIST = (function () {
     const e = SCHEMA.entities[entity];
     const isNew = !id;
     const row = isNew ? {} : DB.find(entity, id);
+    /* 账簿派生数据(科目余额、会计期间)由凭证与结账动作维护,不提供手改入口 */
+    if (e.readonly && !isNew && row) {
+      UI.modal({ title: e.label + ' · ' + row[e.pk], width: 'mid',
+        body: `<div class="notice">${UI.icon('info')}<div><b>只读</b> ${esc(e.table)} 由凭证与期末结账自动维护,不提供手工编辑。</div></div>
+          ${UI.descs(Object.keys(e.fields).map(k => [e.fields[k].l, esc(String(row[k] === undefined ? '' : row[k]))]))}`,
+        actions: [{ label: '关闭', onClick: () => { } }] });
+      return;
+    }
     const fields = Object.keys(e.fields).filter(k => k !== e.pk).map(k => {
       const f = e.fields[k];
       const req = ['name'].indexOf(k) >= 0 || (f.t === 'ref' && !f.hide);
@@ -286,7 +295,7 @@ window.LIST = (function () {
       const f = e.fields[k] || {};
       if (f.t === 'ref' && f.ref && v) { const rec = DB.find(f.ref, v); if (rec && rec.name && rec.name !== v) v = rec.name + '(' + v + ')'; }
       if (f.t === 'select') v = optText(f, v);
-      if (SCHEMA.STATUS[v] && typeof (f.opts || {})[v] === 'object') v = SCHEMA.STATUS[v].l;
+      if (SCHEMA.STATUS[v] && typeof (f.opts || {})[v] === 'object') v = UI.stLabel(v, entity === 'bill' ? 'ap' : '');
       return v === undefined || v === null ? '' : String(v).replace(/"/g, '""');
     }));
     const csv = '' + [head].concat(body).map(r => r.map(c => `"${c}"`).join(',')).join('\r\n');

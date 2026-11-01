@@ -99,9 +99,9 @@ window.DOC = (function () {
       table: '销售出库单', pk: 'no', docTable: 'dl_lines', steps: ['posted'], stepLabels: { posted: '已过账' },
       stepState() { return { posted: 1 }; }, actions() { return [{ l: '打印拣货单', icon: 'print', run: 'print' }]; }
     },
-    gr: { table: '采购收货单', pk: 'no', docTable: 'gr_lines', steps: ['posted', 'bill'], stepLabels: { posted: '收货过账', bill: '账单确认' },
+    gr: { table: '采购收货单', pk: 'no', docTable: 'gr_lines', steps: ['posted', 'bill'], stepLabels: { posted: '收货暂估入账', bill: '票到清算' },
       stepState(o) { return { posted: 1, bill: DB.where('bill', b => b.gr === o.no).length ? 1 : 0 }; },
-      actions(o) { const a = []; if (!DB.where('bill', b => b.gr === o.no).length) a.push({ l: '生成采购账单', cls: 'primary', icon: 'receipt', run: 'toBill' }); a.push({ l: '打印', icon: 'print', run: 'print' }); return a; } },
+      actions(o) { const a = []; if (!DB.where('bill', b => b.gr === o.no).length) a.push({ l: '录入发票并清算', cls: 'primary', icon: 'receipt', run: 'toBill' }); a.push({ l: '打印', icon: 'print', run: 'print' }); return a; } },
     payment: { table: '付款单', pk: 'no', docTable: null, steps: ['posted'], stepLabels: { posted: '已过账' }, stepState() { return { posted: 1 }; }, actions() { return []; } },
     receipt: { table: '收款单', pk: 'no', docTable: null, steps: ['posted'], stepLabels: { posted: '已过账' }, stepState() { return { posted: 1 }; }, actions() { return []; } },
     journal: { table: '记账凭证', pk: 'no', docTable: 'journal_lines', isJournal: true, steps: ['posted'], stepLabels: { posted: '已过账' }, stepState() { return { posted: 1 }; }, actions() { return [{ l: '打印凭证', icon: 'print', run: 'print' }]; } },
@@ -258,7 +258,7 @@ window.DOC = (function () {
     if (!cfg) { LIST.masterForm(entity, no); return; }
     const e = SCHEMA.entities[entity];
     const d = UI.drawer({
-      head: `<div><div class="flex" style="gap:10px"><h3 style="font-size:17px" class="mono">${esc(no)}</h3>${badge(row.status)}</div>
+      head: `<div><div class="flex" style="gap:10px"><h3 style="font-size:17px" class="mono">${esc(no)}</h3>${badge(row.status, entity === 'bill' ? 'ap' : '')}</div>
              <div class="muted small" style="margin-top:3px">${esc(cfg.table)} · ${esc(e.table)}</div></div>`,
       body: `<div id="doc-body">${docBody(entity, row)}</div>`,
       foot: cfg.actions(row).map((a, i) => {
@@ -269,7 +269,7 @@ window.DOC = (function () {
     });
     bindDoc(d, entity, no, cfg);
   }
-  function badge(v) { return UI.badge(v); }
+  function badge(v, kind) { return UI.badge(v, kind); }
 
   function docBody(entity, row) {
     const cfg = CFG[entity], e = SCHEMA.entities[entity];
@@ -306,7 +306,7 @@ window.DOC = (function () {
           const val = r[key] !== undefined && r[key] !== null && r[key] !== '' ? r[key] : (r.no || r.id || '');
           return `<div class="flex" style="padding:7px 0;border-bottom:1px dashed var(--border)">
           <span class="cell-link mono" data-jump="${g.entity}=${encodeURIComponent(val)}">${esc(val)}</span>
-          <span class="grow muted small">${esc(g.label(r))}</span>${badge(r.status)}</div>`;
+          <span class="grow muted small">${esc(g.label(r))}</span>${badge(r.status, g.entity === 'bill' ? 'ap' : '')}</div>`;
         }).join('') : `<div class="muted small">暂无</div>`}
       </div>`).join('')}</div></div></div>`);
 
@@ -330,7 +330,7 @@ window.DOC = (function () {
     if (f.t === 'datetime') return esc(row[key] || '');
     if (f.t === 'select') {
       const v = row[key];
-      if (f.badge) return UI.badge(v);
+      if (f.badge) return UI.badge(v, entity === 'bill' ? 'ap' : '');
       const o = f.opts && (typeof f.opts === 'function' ? f.opts() : f.opts)[v];
       if (o === undefined || o === null || o === 1 || o === true || typeof o === 'object') return esc((SCHEMA.STATUS[v] || {}).l || v || '');
       return esc(o);
@@ -520,7 +520,7 @@ window.DOC = (function () {
       case 'deliver': openQtyModal(entity, no, 'deliver', rerender); break;
       case 'receive': openQtyModal(entity, no, 'receive', rerender); break;
       case 'invoice': openQtyModal(entity, no, 'invoice', rerender); break;
-      case 'toBill': wrap(() => { const b = ACT.createBillFromGR(no); UI.toast('已生成采购账单 ' + b); d.close(); open('bill', b); }); break;
+      case 'toBill': openIRModal(no, rerender); break;
       case 'pay': openMoneyModal('bill', no, rerender); break;
       case 'receipt': openMoneyModal('invoice', no, rerender); break;
       case 'submit': wrap(() => { row.status = 'pending'; DB.upsert('purchase_req', row); DB.log('采购管理', '提交采购申请', no, ''); UI.toast('已提交审批'); }); rerender(); break;
@@ -643,6 +643,68 @@ window.DOC = (function () {
         } catch (e) { UI.toast(e.message, 'err'); return false; }
       } }]
     });
+    return m;
+  }
+
+  /** 票到清算:登记采购发票,允许发票价 ≠ 暂估价,差异与资本化运费回写存货成本 */
+  function openIRModal(no, rerender) {
+    const gr = DB.find('gr', no);
+    const grLines = DB.lines('gr_lines', no);
+    const accrual = r2(gr.amount || 0);
+    const RATES = [13, 9, 6, 5, 3, 0];
+    const m = UI.modal({
+      title: '票到清算 · 登记采购发票', width: 'wide', subtitle: `${no} · ${gr.supplier_name} · 暂估在账 ¥${money(accrual)}`,
+      body: `<div class="table-wrap"><table class="lines-tbl"><thead><tr><th>物料</th><th class="right" style="width:80px">收货数量</th>
+          <th class="right" style="width:100px">暂估单价</th><th class="right" style="width:118px">发票单价</th>
+          <th style="width:96px">税率</th><th class="right" style="width:112px">发票金额</th></tr></thead>
+        <tbody>${grLines.map((l, i) => `<tr data-i="${i}"><td><b>${esc(l.product_name)}</b><div class="cell-sub mono">${esc(l.product)}</div></td>
+          <td class="right money">${num(l.qty)}</td><td class="right muted">¥${money(l.price)}</td>
+          <td class="right"><input type="number" step="0.01" data-p="${i}" value="${l.price}" class="num right"></td>
+          <td><select data-r="${i}">${RATES.map(r => `<option value="${r}"${(l.tax_rate || 13) === r ? ' selected' : ''}>${r}%</option>`).join('')}</select></td>
+          <td class="right"><b class="money" data-a="${i}">¥${money(l.qty * l.price)}</b></td></tr>`).join('')}</tbody></table></div>
+        <div class="form-grid mt16" style="grid-template-columns:repeat(3,1fr)">
+          <div class="fitem"><label>运杂费(不含税,计入存货成本)</label><input type="number" step="0.01" data-x="freight" value="0" class="num"></div>
+          <div class="fitem"><label>运费税率</label><select data-x="frate">${[9, 13, 6, 3, 0].map(r => `<option value="${r}"${r === 9 ? ' selected' : ''}>${r}%</option>`).join('')}</select></div>
+          <div class="fitem"><label>发票备注</label><input data-x="fmemo" placeholder="如:增值税专用发票 已认证"></div></div>
+        <div class="stat-row mt16" id="ir-sum"></div>
+        <div class="notice mt12">${icon('info')}<div>清算凭证:<b>借 应付暂估(GR/IR) ${money(accrual)}</b> 冲销到货暂估,<b>借 应交税费—进项税额</b>,<b>贷 应付账款</b> 价税合计;<br>
+          发票金额与暂估的差额(含资本化运费)按行分摊<b>调整库存商品成本</b>,库存子账与总账 1405 始终同源。<br>
+          收货数量差异请在账单外处理:<b>少收</b>走采购退货,<b>多收</b>补开收货单。</div></div>`,
+      actions: [{ label: '取消' }, { label: '确认清算并过账', cls: 'primary', icon: 'check', onClick: mm => {
+        const plan = { lines: grLines.map((l, i) => ({ product: l.product,
+          price: +(($(`[data-p="${i}"]`, mm.el) || {}).value || l.price),
+          tax_rate: +(($(`[data-r="${i}"]`, mm.el) || {}).value || 0) })),
+          freight: +(($('[data-x="freight"]', mm.el) || {}).value || 0),
+          freight_rate: +(($('[data-x="frate"]', mm.el) || {}).value || 9),
+          freight_memo: ($('[data-x="fmemo"]', mm.el) || {}).value || '' };
+        try {
+          const b = ACT.createBillFromGR(no, plan);
+          UI.toast('已冲销暂估并生成采购账单 ' + b);
+          rerender();
+          setTimeout(() => open('bill', b), 120);
+        } catch (e) { UI.toast(e.message, 'err'); return false; }
+      } }]
+    });
+    function repaint() {
+      let goodsNet = 0, goodsVat = 0;
+      grLines.forEach((l, i) => {
+        const price = +(($(`[data-p="${i}"]`, m.el) || {}).value || 0);
+        const rate = +(($(`[data-r="${i}"]`, m.el) || {}).value || 0);
+        const amt = r2(l.qty * price);
+        goodsNet = r2(goodsNet + amt); goodsVat = r2(goodsVat + amt * rate / 100);
+        const cell = $(`[data-a="${i}"]`, m.el); if (cell) cell.textContent = '¥' + money(amt);
+      });
+      const fr = r2(+(($('[data-x="freight"]', m.el) || {}).value || 0));
+      const frate = +(($('[data-x="frate"]', m.el) || {}).value || 9);
+      const net = r2(goodsNet + fr), vat = r2(goodsVat + fr * frate / 100), total = r2(net + vat);
+      const diff = r2(net - accrual);
+      const box = $('#ir-sum', m.el);
+      if (box) box.innerHTML = `<div>不含税金额<b>¥${money(net)}</b></div><div>进项税额<b>¥${money(vat)}</b></div>
+        <div>价税合计<b class="money">¥${money(total)}</b></div><div>冲销暂估<b>¥${money(accrual)}</b></div>
+        <div>存货成本调整<b style="color:${Math.abs(diff) < 0.005 ? 'var(--text-2)' : diff > 0 ? 'var(--danger)' : 'var(--success)'}">${diff >= 0 ? '+' : '−'}¥${money(Math.abs(diff))}</b></div>`;
+    }
+    UI.$$('input,select', m.el).forEach(i => i.addEventListener('input', repaint));
+    repaint();
     return m;
   }
 
@@ -1332,7 +1394,7 @@ window.DOC = (function () {
         '<td>', dateCN(r.due_date), '</td>',
         '<td class="right money">', '¥', money(r.total), '</td>',
         '<td class="right money"', red, '>', '¥', money(r.balance), '</td>',
-        '<td>', UI.badge(r.status), '</td>',
+        '<td>', UI.badge(r.status, target === 'bill' ? 'ap' : ''), '</td>',
         '</tr>'].join(''));
     }
     return '<div class="table-wrap"><table class="tbl"><thead>' + head + '</thead><tbody>' + body.join('') + '</tbody></table></div>';

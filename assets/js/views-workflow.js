@@ -362,10 +362,10 @@ window.FLOW = (function () {
     dashboard: '看板与经营指标只读', products: '物料主档与库存属性维护', product_release: '新品立项、评审与上架',
     rfq: '询价编制、报价录入与定标', customers: '客户档案与信用额度', sales_order: '订单创建、审核与发货',
     invoice: '开票与红字冲销', receipt: '收款登记', supplier_apply: '供应商准入与建档',
-    purchase_order: '采购下单与审核', purchase_req: '部门申请与审批转采购', bill: '应付账单确认',
+    purchase_order: '采购下单与审核', purchase_req: '部门申请与审批转采购', bill: '应付账单确认与暂估清算',
     payment: '付款登记', processors: '外协商档案维护', processor_audit: '验厂评分与核准',
     os_order: '委外发料与成品收回', stock: '库存现量、调拨与盘点', rma: '售后受理、退款与换货',
-    journal: '凭证与科目余额', reports: '经营分析与账龄报表', role: '角色与授权管理', activity: '操作日志追溯',
+    journal: '凭证与科目余额', period: '期末损益结转、关账与反结账', reports: '经营分析与账龄报表', role: '角色与授权管理', activity: '操作日志追溯',
   };
 
   function currentRoleCode() {
