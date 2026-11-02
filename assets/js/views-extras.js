@@ -9,7 +9,8 @@ window.EXTRAS = (function () {
     const u = DB.find('users', s.code) || {};
     const role = DB.where('role', r => r.name === u.role)[0] || {};
     const left = Math.max(0, Math.round(((s.expires || 0) - Date.now()) / 60000));
-    const logins = DB.where('activity', a => a.module === '系统安全').slice(0, 8);
+    const canAudit = ACT.PERM.can('activity', 'view');
+    const logins = canAudit ? DB.where('activity', a => a.module === '系统安全').slice(0, 8) : [];
     return `<div class="card mt16"><div class="card-head"><h3>${icon('lock')}登录与安全</h3>
       <div class="right"><button class="btn sm" data-action="pwd">${icon('edit')}修改我的口令</button></div></div>
       <div class="card-body"><div class="grid g-2-1">
@@ -23,11 +24,11 @@ window.EXTRAS = (function () {
         ])}
         <div class="notice mt12">${icon('info')}<div>纯静态演示系统:账号与口令保存在浏览器本地,不经过服务端,请勿用于真实数据。</div></div></div>
         <div><div class="section-title">登录审计</div>
-        ${UI.table([
+        ${canAudit ? UI.table([
           { k: 'time', label: '时间', render: r => `<span class="mono small">${esc(String(r.time).slice(5))}</span>` },
           { k: 'action', label: '事件', render: r => `<span class="badge ${r.action === '登录失败' ? 'b-danger' : r.action === '登录成功' ? 'b-success' : 'b-neutral'}">${esc(r.action)}</span>` },
-          { k: 'ref', label: '账号', render: r => `<span class="mono small">${esc(r.ref || '—')}</span><div class="cell-sub">${esc(r.user)}</div>` },
-        ], logins, { pk: 'id', empty: '暂无登录审计记录' })}</div>
+          { k: 'ref', label: '账号', render: r => `<span class="mono small">${esc(r.ref || '—')}</span><div class="cell-sub">${esc(r.detail || '')}</div>` },
+        ], logins, { pk: 'id', empty: '暂无登录审计记录' }) : `<div class="muted small">未授予「操作日志」查看权限,登录审计仅对审计岗可见。</div>`}</div>
       </div></div></div>`;
   }
 
@@ -146,7 +147,11 @@ window.EXTRAS = (function () {
           ['库存与财务 Inventory-to-Finance', '调拨 TR / 盘点 ST 过账 → 出入库流水 MV → 库存现量重算 → 凭证 JE → 科目余额 → 账龄/毛利/周转报表;有借必有贷、账实勾稽由系统强制。', '#047857'],
           ['新品到上架 Product-to-Shelf', '供应商准入 SA(现场评审打分)→ 商品主档 → 新品发布单 → 销售主管裁决毛利与渠道 → 建档上架 → 首单采购;下架保留主档与历史交易。', '#7C3AED'],
           ['委外加工 Outsource', '外协商审核 PA(打样+四维评分)→ 入池核定单价产能 → OS 加工单 → 发料(借 1408 委托加工物资 / 贷 1405)→ 收回(材料+加工费计入成品成本)→ 加工费账单结算。', '#B45309'],
-          ['售后闭环 Return-to-Refund', 'RM 工单(退货/换货/维修)→ 销售主管审批 → 退货入库冲回成本 → 红字发票冲减应收 → 退款(负数收款单)或换货重发;维修费按责任归属费用化或挂应付追偿。', '#BE123C']].map(x => `
+          ['计划与物料 Plan-to-Produce', '物料清单 BM(子件单件用量 ×(1 + 损耗率),提交后按材料影响额分级会签,采购主管核准发布才生效)→ MRP 运算 MR:未履约订单 / 安全库存 / 人工需求三种口径 → 沿生效清单逐层下展(父件按计划下单量引爆子件需求,同层同物料合并、库存桶顺序扣减防重复分配)→ 净需求 = 毛需求 + 安全库存 − 可用量 → 批量规则向上取整并尊重最小起订 → 外购合并成一张 PR 草稿、自制/委外逐件生成 OS 加工单(自动带出 BOM 发料行)→ 下达后仍是草稿,由采购与生产各自审批;运算与建议全程只读台账,不产生库存流水与凭证。', '#4338CA'],
+          ['售后闭环 Return-to-Refund', 'RM 工单(退货/换货/维修)→ 销售主管审批 → 退货入库冲回成本 → 红字发票冲减应收 → 退款(负数收款单)或换货重发;维修费按责任归属费用化或挂应付追偿。', '#BE123C'],
+          ['来料质量 IQC Gate', 'GR 收货按供应商质检策略入待检仓 WH-QC01 隔离(不可销售与领用)→ 自动报检按 GB/T 2828.1 AQL 抽样 → 品质经理三分支裁决:合格放行两腿同价转正品仓、让步接收按折价率冲减暂估 2203 并回写存货成本、拒收退货全额冲销暂估并释放采购订单行;结论回写供应商绩效评分。', '#CA8A04'],
+          ['批次追溯 Lot Traceability', '一笔入库建一个批次(LOT,继承收货/委外/退货/盘盈单据身份)→ 按库区规则落位(收货暂存 / 存储 / 拣货 / 待检隔离 / 残次隔离)→ 出库按 FEFO 先到期先出分配,分配不足自动跨批次并拆批 → 冻结与处置只压缩可售量不动账面金额 → 双向追溯:上游追到供应商批次与采购订单,下游追到出库单、客户与发票;召回 = 影响分析 + 定点冻结 + 处置出库。', '#0F766E'],
+          ['价格策略 Pricing Gate', '价目表(PL)按 客户专属 → 促销 → 渠道协议 → 类目协议 → 阶梯批发 → 标准售价 六级阶梯取价,同级按优先级与生效日决胜 → 草稿不参与取价,提交核准后由销售主管按<b>让利金额</b>分级会签(≥3 万两级、≥12 万三级)→ 生效后订单行自动回填价目表净价与来源 → 成交净价跌破成本红线价(成本 ×(1 + 最低毛利率))即拦截审核,须发起改价申请、按价差金额会签通过后单价才回写放行;停用只压失效日,历史引用可追。', '#DB2777']].map(x => `
         <div class="card"><div class="card-head"><h3 style="color:${x[2]}">${x[0]}</h3></div><div class="card-body"><p class="small" style="line-height:1.9;color:var(--text-2)">${x[1]}</p></div></div>`).join('')}
       </div>`;
     const tables = SCHEMA.visible().filter(k => !['activity'].includes(k)).map(k => {
@@ -165,17 +170,18 @@ window.EXTRAS = (function () {
     return `<div class="page-head"><div><h2>关于与数据字典</h2><div class="desc">Sailfish ERP 是一个纯静态、零依赖、零构建的企业资源计划演示系统:业务模型、单据流转、库存核算与总账勾稽关系均对齐真实 ERP 实现方式。</div></div>
       <div class="page-actions"><button class="btn" data-route="settings">${icon('database')}数据管理</button><button class="btn primary" data-route="dashboard">${icon('dashboard')}进入看板</button></div></div>
       <div class="grid g4">
-        ${UI.kpi({ label: '业务模块', value: num(12) + '<small> 个</small>', icon: 'grid', color: '#4F46E5', foot: '销售/采购/库存/财务/产品/服务商/售后/权限' })}
+        ${UI.kpi({ label: '业务模块', value: num((APP.NAV || []).filter(g => ['工作台', '系统'].indexOf(g.group) < 0).length) + '<small> 个</small>', icon: 'grid', color: '#4F46E5', foot: '产品/商品/订单/售后/计划/采购/服务商/库存/财务/报表/权限' })}
         ${UI.kpi({ label: '数据表', value: num(SCHEMA.visible().length) + '<small> 张</small>', icon: 'layers', color: '#0EA5E9', foot: '含单据主子表结构' })}
         ${UI.kpi({ label: '业务动作', value: num(Object.keys(ACT).filter(k => typeof ACT[k] === 'function').length) + '<small> 项</small>', icon: 'swap', color: '#047857', foot: '审核/过账/结算全链路' })}
         ${UI.kpi({ label: '存储方式', value: 'localStorage', icon: 'database', color: '#7C3AED', foot: '离线可用,可导出备份' })}
       </div>
       <div class="mt20"><div class="section-title">核心业务流程(三单匹配 + 自动凭证)</div>${flow}</div>
-      <div class="card mt16"><div class="card-head"><h3>${icon('grid')}单据编号规则</h3><div class="right"><span class="muted small">前缀 + 年份 + 4 位流水,按年重置</span></div></div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('grid')}单据与主数据编号规则</h3><div class="right"><span class="muted small">单据:前缀 + 年份 + 4 位流水,按年重置;批次尾缀 -S 为跨仓拆批</span></div></div>
         <div class="card-body"><div class="grid g4">
-          ${[['SO', '销售订单'], ['DL', '销售出库单'], ['IV', '销售发票'], ['RC', '收款单'], ['PR', '采购申请'], ['PO', '采购订单'], ['GR', '采购收货单'], ['PB', '采购账单'], ['PY', '付款单'], ['MV', '库存流水'], ['TR', '调拨单'], ['ST', '盘点单'], ['JE', '记账凭证']].map(x => `
+          ${[['SO', '销售订单'], ['DL', '销售出库单'], ['IV', '销售发票'], ['RC', '收款单'], ['PR', '采购申请'], ['PO', '采购订单'], ['GR', '采购收货单'], ['IQC', '来料检验单'], ['PB', '采购账单'], ['PY', '付款单'], ['MV', '库存流水'], ['TR', '调拨单'], ['ST', '盘点单'], ['JE', '记账凭证'], ['AP', '审批单'], ['BM', '物料清单 BOM', `BM${DB.today().slice(0, 4)}-0001`, '按版本 V1.0 迭代,作废不换号'], ['MR', 'MRP 计划运算', `MR${DB.today().slice(0, 4)}-0001`, '一轮运算一张快照'], ['PL', '价目表 / 价格策略'], ['LOT', '批次号', `LOT${DB.today().slice(0, 4)}-0001`], ['BIN', '库位(仓简-库区-巷道-位)', 'HZ-A01-01']].map(x => `
             <div style="padding:9px 11px;border:1px solid var(--border);border-radius:9px"><b class="mono">${x[0]}</b> <span class="small muted">${x[1]}</span>
-            <div class="muted small mono" style="margin-top:2px">${x[0]}${DB.today().slice(0, 4)}-0001</div></div>`).join('')}
+            <div class="muted small mono" style="margin-top:2px">${x[2] || `${x[0]}${DB.today().slice(0, 4)}-0001`}</div>
+            ${x[3] ? `<div class="muted small" style="margin-top:2px">${x[3]}</div>` : ''}</div>`).join('')}
         </div></div></div>
       <div class="card mt16"><div class="card-head"><h3>${icon('book')}财务核算口径</h3></div><div class="card-body"><div class="grid g2">
         <div><div class="section-title">自动生成凭证规则</div>
@@ -185,6 +191,7 @@ window.EXTRAS = (function () {
           ['gr_accrual', '采购收货(货到票未到)', '借:库存商品 1405 / 贷:应付暂估 2203 — 收货即入账,不与供应商对账'],
           ['ap_bill', '票到清算', '借:应付暂估 2203 + 应交税费 2221(进项)/ 贷:应付账款 2202;发票价与暂估差异调整 1405'],
           ['ap_payment', '付款过账', '借:应付账款 2202 / 贷:银行存款 1002'],
+          ['gr_accrual', '来料让步 / 拒收冲暂估', '借:应付暂估 2203 / 贷:库存商品 1405 — 折价或退货部分同步冲减暂估与存货,合格放行只转仓不动金额'],
           ['close', '期末损益结转', '借:收入类 4001/4002 贷:本年利润 3131;借:本年利润 贷:成本与费用'],
           ['stock_adjust', '盘盈盘亏', '借/贷:库存商品 1405 与 其他成本 5401 / 其他业务收入 4002']].map(x => `
           <div class="flex" style="padding:7px 0;border-bottom:1px dashed var(--border)"><span class="tag mono">${x[0]}</span><span class="grow small">${x[1]}</span><span class="muted small" style="text-align:right;max-width:52%">${x[2]}</span></div>`).join('')}</div>
@@ -196,7 +203,10 @@ window.EXTRAS = (function () {
             <li>成本结转:销售出库按出库时点加权成本结转至主营业务成本。</li>
             <li>税码体系:货物销售 13%、运输 9%、服务 6%,由物料主数据 <span class="mono">tax_rate</span> 决定。</li>
             <li>库存占用:审核未出库的销售订单按行占用 <span class="mono">reserved</span>,可用量 = 现量 − 占用。</li>
+            <li>批次与库位:批次台账只承载<b>数量与流向</b>,金额仍按移动加权平均记在 1405;批次上的 <span class="mono">unit_cost</span> 是管理会计口径,不参与总账。出库按 FEFO 先到期先出选批,冻结/过期只压缩可售量,处置出库才结转成本。</li>
             <li>信用控制:客户主数据 <span class="mono">credit_limit</span> 与应收余额联动,超限在客户画像中以颜色提示。</li>
+            <li>计划与物料需求:清单行 <span class="mono">单件耗用 = 用量 ×(1 + 损耗率)</span>;可用量 = 现量 − 销售占用 + 在途采购 + 在制委外;净需求 = 毛需求 + 安全库存 − 可用量,再按最小起订量与整数批量抬升。自制/委外父件按计划下单量向下引爆子件需求,安全库存只在补货口径计一次。<b>MRP 是只读运算</b>:写出 mrp_run / mrp_lines 两张计划表,不动库存流水与凭证,下达出的申请单与加工单也停在草稿。</li>
+            <li>取价与价格红线:订单单价由价目表六级阶梯(客户专属 → 促销 → 渠道 → 类目 → 阶梯 → 标准售价)在<b>成交日</b>重放得出,含税报价按 <span class="mono">tax_rate</span> 折算为未税价再乘行折让;<b>红线价 = 该仓移动加权成本 ×(1 + 最低毛利率)</b>,跌破红线的行必须经改价审批,审批通过才回写单价并计入收入,价目表内已核准的成交价不重复拦截。标准售价与价目表价的差额即让利,是价格报表与毛利体检的唯一口径。</li>
           </ul>
           <div class="section-title">技术架构</div>
           <div class="small" style="line-height:1.9;color:var(--text-2)">
@@ -205,7 +215,7 @@ window.EXTRAS = (function () {
             <div class="mt8">无框架、无 CDN、无构建步骤;双击 index.html 即可运行(也可用 <span class="mono">npx serve .</span> 预览)。图表为手写 SVG,数据全部落在浏览器本地。</div></div>
         </div></div></div></div>
       <div class="mt20"><div class="section-title">数据字典(${SCHEMA.visible().length} 张表)</div>${tables}</div>
-      <div class="notice mt16">${icon('info')}<div><b>使用建议:</b>先到「待办任务」体验一单到底(审核订单 → 创建出库 → 开票 → 收款),再回「经营看板 / 利润表」观察数据联动;所有操作都会写入「操作日志」并可导出 CSV/JSON 备份。</div></div>`;
+      <div class="notice mt16">${icon('info')}<div><b>使用建议:</b>先到「待办任务」体验一单到底(审核订单 → 创建出库 → 开票 → 收款),再回「经营看板 / 利润表」观察数据联动;计划侧可从「物料清单」看多级展开,在「MRP 计划运算」起算并下达建议,「缺料与长周期分析」看实时缺口;所有操作都会写入「操作日志」并可导出 CSV/JSON 备份。</div></div>`;
   }
 
   return { settings, guide, action, bind: { settings: bindSettings, guide: () => { } } };

@@ -320,6 +320,8 @@ svg .bar:hover{opacity:.75}
 .divider{height:1px;background:var(--border);margin:16px 0}
 .kbd{font-family:var(--mono);font-size:11px;background:var(--neutral-bg);border-radius:5px;padding:1px 6px}
 .tag{display:inline-block;font-size:11px;background:var(--surface-2);border:1px solid var(--border);color:var(--text-2);border-radius:6px;padding:1px 7px;margin:2px 3px 2px 0}
+.tag.on{background:var(--primary-50);border-color:var(--primary-100);color:var(--primary-600);font-weight:650}
+.psrc.low{color:var(--danger);font-weight:650}
 .notice{display:flex;gap:11px;padding:12px 14px;border-radius:10px;background:var(--primary-50);color:var(--primary-600);font-size:12.5px;line-height:1.6;align-items:flex-start;border:1px solid var(--primary-100)}
 .notice.warn{background:var(--warning-bg);color:var(--warning);border-color:#F6E2C0}
 .notice svg{width:16px;height:16px;flex:0 0 16px;margin-top:1px}

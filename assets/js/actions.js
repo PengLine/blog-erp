@@ -10,6 +10,8 @@
 window.ACT = (function () {
 
   const r2 = UI.round2;
+  /* 单件耗用保留 4 位:0.038 kg/件 这类用量按 2 位取整会把需求抬高 5% */
+  const r4 = v => Math.round((+v || 0) * 10000) / 10000;
 
   /* ---------------- 库存 ---------------- */
   function stockRow(prodCode, whCode) {
@@ -21,21 +23,60 @@ window.ACT = (function () {
     return s;
   }
   function recalc(s) {
-    s.available = s.qty - s.reserved;
+    s.available = s.qty - s.reserved - LOTX.holdQty(s.product, s.warehouse);
     const p = DB.find('products', s.product) || {};
     s.status = s.qty <= 0 ? 'shortage' : (s.available < (p.safety_qty || 0) ? 'low' : 'normal');
     DB.upsert('stock', s);
     return s;
   }
+  /* ---------------- 批次与库位(分配算法在 lots.js) ---------------- */
+  const LOTX = LOT.engine({
+    lots: () => DB.list('lot'),
+    bins: () => DB.list('bins'),
+    warehouses: wh => DB.find('warehouses', wh),
+    product: code => DB.find('products', code),
+    newLot: row => DB.insert('lot', row),
+    updLot: row => DB.upsert('lot', row),
+    addTx: (lotNo, row) => {
+      const ls = DB.lines('lot_tx', lotNo);
+      row.lineno = ls.length + 1;
+      DB.setLines('lot_tx', lotNo, ls.concat([row]));
+    },
+    nextNo: () => DB.nextNo('lot'),
+    stampMv: m => DB.upsert('stock_movements', m),
+    today: () => DB.today(), addDays: (d, n) => DB.addDays(d, n), user: () => DB.currentUser()
+  });
+  /** 入库流水的批次档案补充信息:来源供应商、供应商批号、来源单据 */
+  function lotMeta(mv) {
+    if (mv.qty <= 0) return null;
+    const out = { source: mv.type };
+    if (mv.ref === '期初建账') out.source = 'init';
+    if (mv.type === 'po_receipt') {
+      const g = DB.find('gr', mv.ref);
+      if (g) { out.supplier = g.supplier; out.supplier_name = g.supplier_name; out.sup_lot = g.sup_lot; out.iqc = g.iqc; }
+    } else if (mv.type === 'os_receive') {
+      const o = DB.find('os_order', mv.ref);
+      if (o) { out.supplier_name = o.processor_name; out.note = '委外加工收回,批次责任外协厂 ' + o.processor_name; }
+    } else if (mv.type === 'so_return') {
+      const r = DB.find('rma', mv.ref);
+      out.note = r ? `客户退货回库(${r.customer_name}),品质复检前不得再次发货` : '退货回库批次';
+    } else if (mv.type === 'stocktake_plus') out.note = '盘盈入账,无源单据批次';
+    else if (mv.type === 'manual') out.note = mv.note || '手工调整入账批次';
+    return out;
+  }
   /** 写库存流水并同步现量;qty 为带符号数量 */
-  function move(prodCode, whCode, qty, unitCost, type, ref, note, toWh) {
+  function move(prodCode, whCode, qty, unitCost, type, ref, note, toWh, preferLots) {
     assertOpen(DB.today(), '出入库');
     const p = DB.find('products', prodCode) || {};
     const no = DB.nextNo('stock_movements');
     const amount = r2(qty * unitCost);
-    DB.insert('stock_movements', { no, date: DB.today(), type, product: prodCode, product_name: p.name || prodCode,
+    const mv = { no, date: DB.today(), type, product: prodCode, product_name: p.name || prodCode,
       warehouse: whCode, to_warehouse: toWh || '', qty, unit_cost: r2(unitCost), amount,
-      ref: ref || '', user: DB.currentUser(), note: note || '' });
+      ref: ref || '', user: DB.currentUser(), note: note || '' };
+    DB.insert('stock_movements', mv);
+    const meta = lotMeta(mv) || {};
+    if (qty < 0 && preferLots && preferLots.length) meta.lots = preferLots;
+    LOTX.apply(mv, meta);
     const s = stockRow(prodCode, whCode);
     s.qty += qty;
     /* 金额按流水发生额逐笔累计(与总账 1405 同源),单位成本再由金额反推,避免二次四舍五入产生账实差 */
@@ -219,7 +260,658 @@ window.ACT = (function () {
   }
   function docTotal(lines, withTax) { return r2(lines.reduce((s, l) => s + lineTotal(l, withTax), 0)); }
 
+  /* ================= 信用风控 ================= */
+  const CREDIT_WATCH = 0.8;          // 使用率 ≥80% 触发预警
+  const CREDIT_BLOCK = 1.0;          // 使用率 >100% 必须走信用特批
+  /** 客户信用占用 = 未结清发票余额 + 已审核未开票订单金额 */
+  function creditState(custCode) {
+    const c = DB.find('customers', custCode) || { code: custCode };
+    const invs = DB.where('invoice', i => i.customer === custCode && i.status !== 'cancelled');
+    const ar = r2(invs.reduce((s, i) => s + Math.max(0, i.balance || 0), 0));
+    const odInvs = invs.filter(i => (i.balance || 0) > 0.004 && i.due_date && i.due_date < DB.today());
+    const overdue = r2(odInvs.reduce((s, i) => s + Math.max(0, i.balance || 0), 0));
+    const odDays = odInvs.reduce((s, i) => Math.max(s, UI.days(i.due_date, DB.today())), 0);
+    const openSOs = DB.where('sales_order', o => o.customer === custCode && ['confirmed', 'partial'].includes(o.status));
+    let open = 0;
+    openSOs.forEach(o => {
+      const billed = invs.filter(i => i.so === o.no).reduce((s, i) => s + (i.total || 0), 0);
+      open += Math.max(0, (o.total || 0) - billed);
+    });
+    const limit = +c.credit_limit || 0;
+    const used = r2(ar + open);
+    return { code: custCode, name: c.name || custCode, limit, ar, open: r2(open), used, free: r2(limit - used),
+      rate: limit > 0 ? used / limit : (used > 0 ? 9.9 : 0), overdue, odDays, hold: c.credit_hold === 'hold',
+      terms: c.payment_terms || '—', openCount: openSOs.length, odCount: odInvs.length };
+  }
+  /** 审核前的信用闸门:冻结直接拦截,超额需信用特批 */
+  function checkCredit(so, extra) {
+    const st = creditState(so.customer);
+    const after = r2(st.used + (extra == null ? (so.total || 0) : extra));
+    const rate = st.limit > 0 ? after / st.limit : (after > 0 ? 9.9 : 0);
+    if (st.hold) throw new Error(`客户「${st.name}」信用已冻结(财务停售),需财务经理在客户档案中解除后才能审核。`);
+    if (rate > CREDIT_BLOCK) {
+      const pend = DB.where('approval', a => a.module === 'credit' && a.biz === so.no && a.status === 'pending')[0];
+      if (pend) throw new Error(`本单已挂信用特批 ${pend.no},等待财务经理裁决。`);
+      throw new Error(`审核将使「${st.name}」信用占用达 ¥${UI.money(after)} / 额度 ¥${UI.money(st.limit)}(${(rate * 100).toFixed(0)}%),超限部分需在订单详情发起「信用特批」。`);
+    }
+    return Object.assign(st, { after, rate, warn: rate >= CREDIT_WATCH });
+  }
+  /** 发起信用特批:财务经理裁决通过后订单自动审核 */
+  function submitCreditRelease(soNo) {
+    const so = DB.find('sales_order', soNo);
+    if (!so) throw new Error('订单不存在');
+    if (so.status !== 'draft') throw new Error('仅草稿订单需要发起信用特批');
+    const pend = DB.where('approval', a => a.module === 'credit' && a.biz === soNo && a.status === 'pending')[0];
+    if (pend) throw new Error(`本单已挂信用特批 ${pend.no},请勿重复发起`);
+    const st = creditState(so.customer);
+    const after = r2(st.used + (so.total || 0));
+    const over = r2(Math.max(0, after - st.limit));
+    const no = submitApproval('credit', soNo, {
+      title: `信用特批 ${so.customer_name} · ${soNo}`, amount: so.total, role: '财务经理', priority: 'urgent',
+      note: `额度 ¥${UI.money(st.limit)} · 已占用 ¥${UI.money(st.used)} · 本单 ¥${UI.money(so.total)} · 超额 ¥${UI.money(over)}`,
+      applicant: so.salesperson || DB.currentUser()
+    });
+    so.credit_ap = no; so.note = (so.note ? so.note + ' / ' : '') + `信用超额待批 ${no}`;
+    DB.upsert('sales_order', so);
+    DB.log('销售管理', '发起信用特批', no, `${so.customer_name} 超额 ¥${UI.money(over)}`);
+    return { no, over, st, after };
+  }
+  /** 收款释放额度后,自动放行等待中的同客户特批 */
+  function releaseCredit(customerCode, reason) {
+    const list = DB.where('approval', a => a.module === 'credit' && a.status === 'pending')
+      .filter(a => { const so = DB.find('sales_order', a.biz); return so && so.customer === customerCode && so.status === 'draft'; });
+    const st = creditState(customerCode);
+    const done = [];
+    list.forEach(a => {
+      const so = DB.find('sales_order', a.biz);
+      const after = r2(st.used + (so.total || 0));
+      if (st.hold || (st.limit > 0 && after > st.limit * CREDIT_BLOCK)) return;
+      const pct = st.limit > 0 ? Math.round(after / st.limit * 100) : 0;
+      decideApproval(a.no, true, `${reason};额度使用率回落至 ${pct}%,系统自动放行`, { force: true });
+      done.push(a.no);
+    });
+    return done;
+  }
+  /** 反审核/取消后额度即时回收,无需额外动作:占用额仅统计已确认与部分出库订单 */
+
+  /* ================= 价格策略与取价引擎 ================= */
+  const PRICE_FLOOR = 0.05;                 // 无价目表红线时的默认毛利率底线
+  const KIND_WEIGHT = { customer: 1, promo: 2, channel: 3, category: 4, tier: 5, std: 6 };
+  const KIND_TXT = SCHEMA.entities.price_list.fields.kind.opts;
+
+  /** 有效期内的已生效价目表;优先级数值小者在前,同级取生效日更新者 */
+  function activeLists(date) {
+    return DB.list('price_list')
+      .filter(pl => pl.status === 'approved'
+        && (!pl.valid_from || date >= pl.valid_from)
+        && (!pl.valid_to || date <= pl.valid_to))
+      .sort((a, b) => (a.priority || 50) - (b.priority || 50) || String(b.valid_from).localeCompare(String(a.valid_from)));
+  }
+  /** 单张价目表命中物料与起订量档位:满足量的档位里取最大批量(量大有价),不满足则不参与 */
+  function listQuote(pl, product, qty) {
+    if (pl.category && (DB.find('products', product) || {}).category !== pl.category) return null;
+    const hit = DB.lines('pl_lines', pl.no).filter(l => l.product === product && (l.tier_qty || 0) <= qty)
+      .sort((a, b) => (b.tier_qty || 0) - (a.tier_qty || 0))[0];
+    return hit || null;
+  }
+  /** 成交时点的成本基准:有该仓移动加权成本用它,否则回落到物料标准成本 */
+  function priceCost(product, warehouse) {
+    const s = warehouse ? DB.find('stock', product + '-' + warehouse) : null;
+    const p = DB.find('products', product) || {};
+    const cost = s && s.cost ? s.cost : (p.cost || 0);
+    return r2(cost);
+  }
+  /** 毛利率红线价:成本 ×(1 + 红线毛利率),价目表自带红线优先,缺省用全局底线 */
+  function priceFloor(product, warehouse, marginRate) {
+    const cost = priceCost(product, warehouse);
+    const rate = marginRate == null ? PRICE_FLOOR : +marginRate;
+    return { cost, rate, price: r2(cost * (1 + rate)) };
+  }
+  /** 取价阶梯:客户专属 → 促销 → 渠道 → 类目 → 阶梯 → 标准,逐级回落到物料主数据售价 */
+  function pricePick(ctx) {
+    const date = ctx.date || DB.today();
+    const qty = Math.max(0, +ctx.qty || 0);
+    const p = DB.find('products', ctx.product) || {};
+    const std = r2(p.price || 0);
+    const lists = activeLists(date);
+    let best = null;
+    for (let i = 0; i < lists.length; i++) {
+      const pl = lists[i];
+      if (pl.kind === 'customer' && (!ctx.customer || pl.customer !== ctx.customer)) continue;
+      if (pl.kind === 'channel' && (!ctx.channel || pl.channel !== ctx.channel)) continue;
+      if (pl.customer && pl.customer !== ctx.customer) continue;
+      const line = listQuote(pl, ctx.product, qty);
+      if (!line) continue;
+      const rank = (KIND_WEIGHT[pl.kind] || 9) * 100 + (pl.priority || 50);
+      if (best && best.rank <= rank) continue;
+      const gross = r2(line.price || 0);
+      const taxInc = pl.tax_included === 'y';
+      const tr = +p.tax_rate || 13;
+      const net = r2(taxInc ? gross / (1 + tr / 100) : gross);
+      best = { rank, listNo: pl.no, listName: pl.name, kind: pl.kind, gross, price: net,
+        discount: +line.discount || 0, tierQty: line.tier_qty || 0, taxIncluded: taxInc, taxRate: tr,
+        marginFloor: pl.margin_floor == null ? PRICE_FLOOR : +pl.margin_floor,
+        source: `${KIND_TXT[pl.kind] || pl.kind} · ${pl.no}${line.tier_qty ? `(满 ${UI.num(line.tier_qty)} 件)` : ''}` };
+    }
+    if (!best) best = { rank: 999, listNo: '', listName: '', kind: 'std', gross: std, price: std,
+      discount: 0, tierQty: 0, taxIncluded: false, taxRate: +p.tax_rate || 13, marginFloor: PRICE_FLOOR,
+      source: '标准售价 · 物料主数据' };
+    best.net = r2(best.price * (1 - best.discount));          // 未税成交价:价目表价扣行折让,与订单行口径一致
+    const fl = priceFloor(ctx.product, ctx.warehouse, best.marginFloor);
+    const net = best.net;
+    best.cost = fl.cost;
+    best.floor = fl.price;
+    best.margin = net > 0 ? r2((net - fl.cost) / net) : 0;
+    best.below = net > 0 && net < fl.price;
+    return best;
+  }
+  /** 整单毛利体检:低于红线价的行需要改价审批,价目表内已核准的价格不重复拦截 */
+  function priceGuard(so, lines) {
+    const out = [];
+    (lines || DB.lines('so_lines', so.no)).forEach(l => {
+      if (!l.product || !l.qty) return;
+      const q = pricePick({ customer: so.customer, product: l.product, qty: l.qty, date: so.date || DB.today(), channel: so.channel, warehouse: so.warehouse });
+      const net = r2((l.price || 0) * (1 - (l.discount || 0)));
+      if (net <= 0) { out.push({ lineno: l.lineno, product: l.product, product_name: l.product_name, qty: l.qty, price: l.price, floor: q.floor, cost: q.cost, net, gap: r2(q.floor - net), zero: true }); return; }
+      if (q.listNo && Math.abs(net - q.net) < 0.005) return;      // 按价目表成交即视为已核准
+      if (net < q.floor) out.push({ lineno: l.lineno, product: l.product, product_name: l.product_name, qty: l.qty, price: l.price, discount: l.discount || 0, floor: q.floor, cost: q.cost, net, gap: r2(q.floor - net), std: q.price, source: q.source });
+    });
+    return out;
+  }
+  /** 发起改价审批:按价差金额分级会签,通过后回写订单行单价 */
+  function submitPriceChange(soNo, rows, reason) {
+    const so = DB.find('sales_order', soNo);
+    if (!so) throw new Error('订单不存在');
+    if (so.status !== 'draft') throw new Error('仅草稿订单可以发起改价,已审核订单请走订单变更');
+    const pend = DB.where('approval', a => a.module === 'price_change' && a.biz === soNo && a.status === 'pending')[0];
+    if (pend) throw new Error(`本单已挂改价审批 ${pend.no},等待裁决`);
+    const lines = DB.lines('so_lines', soNo);
+    const plan = (rows || []).map(r => {
+      const l = lines.find(x => x.lineno === r.lineno || x.product === r.product);
+      if (!l) return null;
+      const q = pricePick({ customer: so.customer, product: l.product, qty: l.qty, date: so.date || DB.today(), channel: so.channel, warehouse: so.warehouse });
+      const ref = r2(q.net);                       // 价目表口径净价:改价影响一律与它对比较
+      const newNet = r2(+r.price * (1 - (+r.discount || 0)));
+      return { lineno: l.lineno, product: l.product, product_name: l.product_name, qty: l.qty,
+        old_price: l.price, new_price: +r.price, old_discount: l.discount || 0, new_discount: +r.discount || 0,
+        cost: q.cost, floor: q.floor, list_price: ref, list_src: q.source, impact: r2((newNet - ref) * l.qty) };
+    }).filter(Boolean);
+    if (!plan.length) throw new Error('没有需要改价的行');
+    const impact = r2(plan.reduce((s, x) => s + x.impact, 0));
+    const no = submitApproval('price_change', soNo, {
+      title: `改价申请 ${so.customer_name} · ${soNo}`, amount: r2(Math.abs(impact)), role: '销售主管',
+      priority: Math.abs(impact) >= 30000 ? 'urgent' : 'std',
+      applicant: so.salesperson || DB.currentUser(),
+      note: `${plan.length} 行调价,收入影响 ¥${UI.money(impact)} · 订单额 ¥${UI.money(so.total)} · ${reason || ''}`,
+      payload: { rows: plan, reason: reason || '' }
+    });
+    so.price_ap = no;
+    so.note = (so.note ? so.note + ' / ' : '') + `改价待批 ${no}`;
+    DB.upsert('sales_order', so);
+    DB.log('销售管理', '发起改价审批', no, `${so.customer_name} · ${plan.length} 行 · 影响 ¥${UI.money(impact)}`);
+    return { no, impact, plan };
+  }
+  /** 改价裁决回写:通过则按审批载荷改行价并重算订单额,驳回则留痕等销售改单 */
+  function applyPriceChange(biz, ok, ap) {
+    const so = DB.find('sales_order', biz);
+    if (!so) return;
+    so.price_ap = ok ? ap.no : '';
+    so.note = (so.note || '').split(' / ').filter(x => !/改价待批|改价审批/.test(x)).join(' / ');
+    if (ok && ap.payload && ap.payload.rows) {
+      const lines = DB.lines('so_lines', biz);
+      ap.payload.rows.forEach(r => {
+        const l = lines.find(x => x.lineno === r.lineno);
+        if (!l) return;
+        l.price = r.new_price; l.discount = r.new_discount;
+        l.amount = r2(l.qty * l.price * (1 - (l.discount || 0)));
+        l.price_src = `改价审批 ${ap.no}`;
+      });
+      DB.setLines('so_lines', biz, lines);
+      so.total = docTotal(lines); so.amount = so.total;
+      DB.upsert('sales_order', so);
+      so.note = (so.note ? so.note + ' / ' : '') + `改价审批 ${ap.no} 已通过,单价已回写`;
+    } else {
+      so.note = (so.note ? so.note + ' / ' : '') + `改价审批 ${ap.no} 被驳回(${ap.approver || '销售主管'}),按价目表价重新报价`;
+    }
+    DB.upsert('sales_order', so);
+    DB.log('销售管理', ok ? '改价审批通过' : '改价审批驳回', ap.no, `${so.customer_name} · ${biz}`);
+  }
+  /** 近半年实际销量:价目表让利的金额影响按它折算,客户专属价只看该客户自己的成交 */
+  function soldQty(product, customer) {
+    let q = 0;
+    DB.list('so_lines').forEach(l => {
+      if (l.product !== product) return;
+      const o = DB.find('sales_order', l.doc);
+      if (!o || o.status === 'draft' || o.status === 'cancelled') return;
+      if (customer && o.customer !== customer) return;
+      q += l.qty || 0;
+    });
+    return q;
+  }
+  /** 让利测算:每行成交价对标准售价的价差 × 实际销量,合计即价格策略的收入影响 */
+  function listImpact(pl) {
+    const lines = DB.lines('pl_lines', pl.no);
+    let total = 0;
+    const rows = lines.map(l => {
+      const p = DB.find('products', l.product) || {};
+      const std = r2(l.std_price || p.price || 0);
+      const net = r2((l.price || 0) * (1 - (l.discount || 0)));
+      const qty = soldQty(l.product, pl.kind === 'customer' ? pl.customer : '');
+      const give = r2((net - std) * qty);
+      total += give;
+      return { lineno: l.lineno, product: l.product, product_name: l.product_name || p.name, tier_qty: l.tier_qty || 0,
+        std, net, delta: r2(net - std), qty, give, margin: net > 0 ? r2((net - (l.cost || p.cost || 0)) / net) : 0 };
+    });
+    return { rows, total: r2(total), lines: rows.length };
+  }
+  /** 提交价目表核准:让利金额越大,会签层级越高;生效后取价引擎即刻引用 */
+  function submitListApproval(no) {
+    const pl = DB.find('price_list', no);
+    if (!pl) throw new Error('价目表不存在');
+    if (pl.status !== 'draft' && pl.status !== 'rejected') throw new Error('仅草稿或被驳回的价目表可以提交核准');
+    if (!DB.lines('pl_lines', no).length) throw new Error('请先维护价格行再提交核准');
+    const im = listImpact(pl);
+    const amount = r2(Math.abs(im.total));
+    const ap = submitApproval('price_list', no, {
+      title: `${pl.name} 生效核准`, applicant: pl.owner || DB.currentUser(), role: '销售主管', amount,
+      priority: amount >= SCHEMA.SIGN_TIERS[SCHEMA.SIGN_TIERS.length - 1].min ? 'urgent' : 'std',
+      note: `${im.lines} 个价格行,相对标准售价让利 ¥${UI.money(Math.abs(im.total))}(按近半年实际销量折算)· 红线毛利率 ${(+((pl.margin_floor == null ? PRICE_FLOOR : pl.margin_floor) * 100).toFixed(1))}%`
+    });
+    pl.status = 'pending'; pl.ap = ap;
+    pl.note = (pl.note ? pl.note + ' / ' : '') + `已提交核准 ${ap},待销售主管裁决`;
+    DB.upsert('price_list', pl);
+    DB.log('商品管理', '提交价目表核准', ap.no, `${pl.name} · 让利 ¥${UI.money(Math.abs(im.total))}`);
+    return { no: ap, impact: im.total, rows: im.rows.length };
+  }
+  /** 核准裁决:通过即生效,驳回退回草稿口径等待修订 */
+  function applyListDecision(biz, ok, ap) {
+    const pl = DB.find('price_list', biz);
+    if (!pl) return;
+    pl.status = ok ? 'approved' : 'rejected';
+    pl.note = (pl.note ? pl.note + ' / ' : '')
+      + (ok ? `${ap.no} 已核准,${pl.valid_from} 起取价引擎引用`
+            : `${ap.no} 被${ap.approver || '销售主管'}驳回:${ap.opinion || '让利幅度超出预算'}`);
+    DB.upsert('price_list', pl);
+    DB.log('商品管理', ok ? '价目表核准生效' : '价目表核准驳回', ap.no, `${pl.name} · ${biz}`);
+  }
+  /** 停用:把失效日压到今天,次日不再被取价,历史引用留痕 */
+  function retireList(no, reason) {
+    const pl = DB.find('price_list', no);
+    if (!pl) throw new Error('价目表不存在');
+    if (pl.status !== 'approved') throw new Error('仅已生效的价目表需要停用');
+    pl.valid_to = DB.today();
+    pl.note = (pl.note ? pl.note + ' / ' : '') + `${DB.today()} 起停用:${reason || '策略调整'}`;
+    DB.upsert('price_list', pl);
+    DB.log('商品管理', '价目表停用', no, `${pl.name} · ${reason || '策略调整'}`);
+    return pl;
+  }
+
+  /* ================= 物料清单 BOM ================= */
+  /* 单件耗用 = 用量 ×(1 + 损耗率):损耗只抬高子件需求,不改父件数量口径 */
+  function bomUnitUse(l) { return r4((+l.qty || 0) * (1 + (+l.loss_rate || 0))); }
+  /** 生效清单:同一父件在同一时点只认一张已核准且在有效期内的 BOM,取生效日最新、版本号最大者 */
+  function bomFor(product, date) {
+    date = date || DB.today();
+    const cands = DB.list('bom').filter(b => b.product === product && b.status === 'approved'
+      && (!b.effect_from || b.effect_from <= date) && (!b.effect_to || b.effect_to >= date));
+    return cands.sort((a, b) => String(b.effect_from || '').localeCompare(String(a.effect_from || ''))
+      || String(b.version || '').localeCompare(String(a.version || '')))[0] || null;
+  }
+  /** 成本滚算:一件父件的材料成本 = Σ 子件(单件耗用 × 子件标准成本),自下而上递归 */
+  function bomMatCost(product, date, path) {
+    path = path || [];
+    if (path.indexOf(product) >= 0) return 0;
+    const bom = bomFor(product, date);
+    if (!bom) return r2(((DB.find('products', product) || {}).cost) || 0);
+    const next = path.concat([product]);
+    return r2(DB.lines('bom_lines', bom.no).reduce((s, l) => {
+      const unit = bomFor(l.product, date) ? bomMatCost(l.product, date, next) : ((DB.find('products', l.product) || {}).cost || 0);
+      return s + bomUnitUse(l) * unit;
+    }, 0));
+  }
+  /** 多级展开:tree 供结构树渲染,rows 按物料汇总毛需求(取最小层级)供 MRP 与缺料分析
+      o.bom 可指定"从这一张清单起算",草稿与改版还没生效时也要能看见自己的结构 */
+  function bomExplode(product, qty, o) {
+    o = o || {};
+    const date = o.date || DB.today(), maxLevel = o.maxLevel || 8;
+    const rows = {};
+    let deepest = 1;
+    function build(code, use, level, path, from) {
+      const p = DB.find('products', code) || {};
+      const bom = !from && level === 1 && o.bom ? o.bom : bomFor(code, date);
+      const n = { code, name: p.name || code, level, qty: r2(use), uom: p.uom || 'PCS', mrp_src: p.mrp_src || 'buy',
+        cost: r2(p.cost || 0), amount: r2(use * (p.cost || 0)), bom: bom ? bom.no : '', children: [], cycle: false, from: from || '' };
+      if (!bom) { n.leaf = true; return n; }
+      if (path.indexOf(code) >= 0 || level > maxLevel) { n.cycle = true; return n; }
+      const next = path.concat([code]);
+      DB.lines('bom_lines', bom.no).forEach(l => {
+        const childQty = r2(n.qty * bomUnitUse(l));
+        const c = build(l.product, childQty, level + 1, next, code);
+        c.per_unit = r2(+l.qty || 0); c.loss = r2(+l.loss_rate || 0);
+        c.key_part = l.key_part === 'y'; c.substitute = l.substitute || ''; c.position = l.position || '';
+        n.children.push(c);
+        deepest = Math.max(deepest, level + 1);
+        const r = rows[l.product] || (rows[l.product] = { product: l.product, product_name: c.name, level: level + 1,
+          gross: 0, uom: c.uom, mrp_src: c.mrp_src, cost: c.cost, parents: [], key_part: false, cycle: false });
+        r.gross = r2(r.gross + childQty);
+        r.level = Math.min(r.level, level + 1);
+        if (r.parents.indexOf(code) < 0) r.parents.push(code);
+        if (c.key_part) r.key_part = true;
+        if (c.cycle) r.cycle = true;
+      });
+      return n;
+    }
+    const root = build(product, +qty || 0, 1, [], '');
+    return { root: root, rows: Object.keys(rows).map(k => rows[k]).sort((a, b) => a.level - b.level || b.gross - a.gross),
+      levels: deepest };
+  }
+  /** 层数口径与 bomExplode 一致(父件本身算第 1 层,单层清单 = 2):草稿与改版还没生效,
+      bomFor 取不到自己,所以按传入的子件行下钻,而不是从父项物料起算 */
+  function bomDepthOf(lines, path) {
+    path = path || [];
+    if (!(lines || []).length) return 1;
+    let h = 0;
+    (lines || []).forEach(l => {
+      const sub = bomFor(l.product);
+      /* 外购子件占一层;自制子件按它自己的清单继续往下数 */
+      h = Math.max(h, sub && path.indexOf(sub.no) < 0 ? bomDepthOf(DB.lines('bom_lines', sub.no), path.concat([sub.no])) : 1);
+    });
+    return 1 + h;
+  }
+  function bomDepth(bom) { return bom ? bomDepthOf(DB.lines('bom_lines', bom.no)) : 1; }
+  /** 本清单口径的单件材料成本(自子件行滚算,不依赖父项是否已生效) */
+  function bomMatCostOf(bom, path) {
+    if (!bom) return 0;
+    path = path || [];
+    if (path.indexOf(bom.no) >= 0) return 0;
+    const next = path.concat([bom.no]);
+    return r2(DB.lines('bom_lines', bom.no).reduce((s, l) => {
+      const sub = bomFor(l.product);
+      const unit = sub && sub.no !== bom.no ? bomMatCostOf(sub, next) : r2((DB.find('products', l.product) || {}).cost || 0);
+      return s + bomUnitUse(l) * unit;
+    }, 0));
+  }
+  /** 反查:某物料被哪些已核准清当作组件使用(工程变更影响面) */
+  function bomWhereUsed(code) {
+    return DB.list('bom_lines').filter(l => l.product === code)
+      .map(l => ({ l: l, b: DB.find('bom', l.doc) })).filter(x => x.b && x.b.status !== 'draft')
+      .map(x => ({ no: x.b.no, name: x.b.name, parent: x.b.product, parent_name: x.b.product_name,
+        per_unit: r2(+x.l.qty || 0), loss: r2(+x.l.loss_rate || 0), status: x.b.status }))
+      .sort((a, b) => String(a.no).localeCompare(String(b.no)));
+  }
+  /** 变更影响:单件材料成本 × 近半年父项销量,作为 BOM 核准的分级金额 */
+  function bomImpact(bom) {
+    const lines = DB.lines('bom_lines', bom.no);
+    const unit = bomMatCostOf(bom);
+    const since = DB.addDays(DB.today(), -182);
+    const sold = DB.list('so_lines').filter(l => l.product === bom.product)
+      .reduce((s, l) => s + (+l.qty || 0), 0);
+    return { unit: unit, sold: sold, lines: lines.length, annual: r2(unit * sold),
+      rows: lines.map(l => ({ product: l.product, product_name: l.product_name, per_unit: +l.qty || 0,
+        loss: +l.loss_rate || 0, use: bomUnitUse(l), cost: r2((DB.find('products', l.product) || {}).cost || 0),
+        amount: r2(bomUnitUse(l) * ((DB.find('products', l.product) || {}).cost || 0)) })) };
+  }
+  /** 提交核准:草稿/驳回可提;按半年滚动销量测算材料影响额,达档位自动加签 */
+  function bomSubmit(no) {
+    const b = DB.find('bom', no);
+    if (!b) throw new Error('BOM 不存在');
+    if (b.status !== 'draft' && b.status !== 'rejected') throw new Error('仅草稿或被驳回的清单可以提交核准');
+    const lines = DB.lines('bom_lines', no);
+    if (!lines.length) throw new Error('请先维护子件行再提交核准');
+    if (lines.some(l => l.product === b.product)) throw new Error('子件不能引用父件自身(会造成展开死循环)');
+    const im = bomImpact(b);
+    const ap = submitApproval('bom', no, {
+      title: `${b.product_name || b.product} BOM ${b.version} 发布核准`, applicant: b.owner || DB.currentUser(),
+      role: '采购主管', amount: im.annual, priority: im.annual >= SCHEMA.SIGN_TIERS[1].min ? 'urgent' : 'std',
+      note: `${lines.length} 项子件 · 单件材料成本 ¥${UI.money(im.unit)} · 近半年销量 ${UI.num(im.sold)} 件`
+    });
+    b.status = 'pending'; b.ap = ap; b.lines_cnt = lines.length;
+    /* mat_cost 恒为本清单子件行的直接材料合计(与编辑器、种子口径一致),滚算成本只用于核价与影响额 */
+    b.mat_cost = r2(lines.reduce((s, l) => s + bomUnitUse(l) * ((DB.find('products', l.product) || {}).cost || 0), 0));
+    b.levels = bomDepth(b);
+    DB.upsert('bom', b);
+    DB.log('计划管理', 'BOM 提交核准', no, `${b.name} · 影响额 ¥${UI.money(im.annual)}`);
+    return ap;
+  }
+  function applyBomDecision(no, ok, ap) {
+    const b = DB.find('bom', no);
+    if (!b) return;
+    b.status = ok ? 'approved' : 'rejected';
+    b.note = (b.note ? b.note + ' / ' : '') + (ok ? `${DB.today()} 经 ${ap.approver || '采购主管'} 核准发布`
+      : `${ap.no} 被驳回(${ap.opinion || '资料不全'}),请修改后重提`);
+    DB.upsert('bom', b);
+    if (ok) {
+      const p = DB.find('products', b.product);
+      if (p) { p.bom_no = b.no; if (!p.mrp_src) p.mrp_src = b.mrp_src || 'make'; DB.upsert('products', p); }
+    }
+    DB.log('计划管理', ok ? 'BOM 核准发布' : 'BOM 核准驳回', no, `${b.name} · ${ok ? '进入 MRP 展开范围' : '暂不参与计划运算'}`);
+  }
+  /** 作废:只压失效日,历史展开与已下达的计划建议保持可追 */
+  function bomObsolete(no, reason) {
+    const b = DB.find('bom', no);
+    if (!b) throw new Error('BOM 不存在');
+    if (b.status === 'obsolete') throw new Error('该清单已作废');
+    b.status = 'obsolete'; b.effect_to = DB.today();
+    b.note = (b.note ? b.note + ' / ' : '') + `${DB.today()} 作废:${reason || '工程变更,改用新版清单'}`;
+    DB.upsert('bom', b);
+    const p = DB.find('products', b.product);
+    if (p && p.bom_no === b.no) { p.bom_no = ''; DB.upsert('products', p); }
+    DB.log('计划管理', 'BOM 作废', no, `${b.name} · ${reason || '工程变更'}`);
+    return b;
+  }
+
+  /* ================= MRP 计划运算 ================= */
+  /** 供给口径:现量 − 订单占用 + 在途(已确认采购未收) + 在制(已确认委外未收回) */
+  function mrpSupply(code, warehouse) {
+    const rows = DB.where('stock', s => s.product === code && (!warehouse || s.warehouse === warehouse));
+    const onHand = rows.reduce((s, x) => s + (x.qty || 0), 0);
+    const held = rows.reduce((s, x) => s + (x.reserved || 0), 0);
+    let inflow = 0;
+    DB.list('purchase_order').filter(o => o.status === 'confirmed' || o.status === 'partial').forEach(o => {
+      if (warehouse && o.warehouse !== warehouse) return;
+      DB.lines('po_lines', o.no).forEach(l => { if (l.product === code) inflow += Math.max(0, (l.qty || 0) - (l.received || 0)); });
+    });
+    DB.list('os_order').filter(o => ['confirmed', 'issued', 'received'].indexOf(o.status) >= 0).forEach(o => {
+      if (warehouse && o.warehouse !== warehouse) return;
+      if (o.output_product === code) inflow += Math.max(0, (o.output_qty || 0) - (o.received_qty || 0));
+    });
+    return { on_hand: onHand, reserved: held, on_order: inflow, avail: onHand - held + inflow };
+  }
+  /** 参考单价:最近一笔采购订单的实际成交价,无采购史则回落物料标准成本 */
+  function mrpPrice(code) {
+    const hit = DB.list('purchase_order').filter(o => o.status !== 'draft' && o.status !== 'cancelled')
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+      .map(o => DB.lines('po_lines', o.no).find(l => l.product === code)).find(Boolean);
+    if (hit && hit.price) return r2(+hit.price);
+    return r2((DB.find('products', code) || {}).cost || 0);
+  }
+  /** 批量规则:净需求向上取整;不足最小起订量时按 MOQ 下单——宁可多采也不拆单 */
+  function mrpLot(net, moq) {
+    const q = Math.max(1, Math.ceil(net - 1e-6));
+    return (+moq || 0) > q ? (+moq || 0) : q;
+  }
+  /** 需求清单:未履约订单缺口 / 安全库存补货 / 人工指定,同一物料多来源合并并保留最早需求日 */
+  function mrpDemand(o) {
+    const today = DB.today(), horizon = +o.horizon || 60, out = {};
+    const push = (code, qty, date, from) => {
+      if (!code || !(qty > 0)) return;
+      const r = out[code] || (out[code] = { product: code, qty: 0, need_date: date, from: [] });
+      r.qty += qty;
+      if (String(date) < String(r.need_date)) r.need_date = date;
+      if (from && r.from.indexOf(from) < 0 && r.from.length < 4) r.from.push(from);
+    };
+    if (o.source === 'safety') {
+      DB.list('products').filter(p => (+p.safety_qty || 0) > 0).forEach(p => {
+        const s = mrpSupply(p.code, o.warehouse);
+        /* 毛需求记「目标库存 = 安全库存」,运算只减可用量,安全库存不再重复计入 */
+        if ((+p.safety_qty || 0) - s.avail > 0) push(p.code, Math.ceil(+p.safety_qty), DB.addDays(today, 7), '安全库存补货');
+      });
+    } else if (o.source === 'manual') {
+      (o.demand || []).forEach(d => push(d.product, Math.round(+d.qty || 0), d.need_date || DB.addDays(today, horizon), d.from || '人工需求'));
+    } else {
+      DB.list('sales_order').filter(x => x.status === 'confirmed' || x.status === 'partial').forEach(x => {
+        if (o.warehouse && x.warehouse !== o.warehouse) return;
+        const nd = x.required_date || DB.addDays(x.date, 14);
+        if (UI.days(today, nd) > horizon) return;
+        DB.lines('so_lines', x.no).forEach(l => push(l.product, Math.max(0, (l.qty || 0) - (l.delivered || 0)), nd, x.no));
+      });
+    }
+    return Object.keys(out).map(k => out[k]).sort((a, b) => String(a.need_date).localeCompare(String(b.need_date)));
+  }
+  /** 运算主流程:逐层下展,父件按"本轮计划下单量"引爆子件需求,库存桶顺序扣减避免重复分配 */
+  function mrpRun(o) {
+    o = o || {};
+    const today = DB.today(), wh = o.warehouse || '';
+    const source = o.source || 'so_open', horizon = +o.horizon || 60;
+    const demand = mrpDemand({ source: source, horizon: horizon, warehouse: wh, demand: o.demand });
+    if (!demand.length) throw new Error('该口径下没有待满足的需求:请检查订单状态、计划周期或安全库存设置');
+    const bucket = {};   // code -> 逐轮扣减后的剩余可用量
+    const left = code => (code in bucket ? bucket[code] : (bucket[code] = mrpSupply(code, wh).avail));
+    const rows = {};
+    let frontier = demand.map(d => ({ code: d.product, qty: d.qty, level: 0, need_date: d.need_date, parents: d.from }));
+    let deepest = 0;
+    for (let level = 0; level <= 8 && frontier.length; level++) {
+      const merged = {};
+      frontier.forEach(f => {
+        const m = merged[f.code] || (merged[f.code] = { code: f.code, qty: 0, level: f.level, need_date: f.need_date, parents: [] });
+        m.qty = r2(m.qty + f.qty);
+        if (String(f.need_date) < String(m.need_date)) m.need_date = f.need_date;
+        f.parents.forEach(p => { if (m.parents.indexOf(p) < 0) m.parents.push(p); });
+      });
+      const next = [];
+      Object.keys(merged).forEach(code => {
+        const f = merged[code];
+        const p = DB.find('products', code) || {};
+        const bom = bomFor(code, today);
+        const mode = p.mrp_src || (bom ? 'make' : 'buy');
+        const sup = mrpSupply(code, wh);
+        const safety = level ? 0 : (source === 'safety' ? 0 : (+p.safety_qty || 0));   /* 安全库存只在补货口径计一次:日算口径的需求行已含目标库存 */
+        const avail = left(code);
+        const net = Math.max(0, r2(f.qty + safety - avail));
+        const lead = Math.max(1, +p.lead_time || (mode === 'buy' ? 14 : 10));
+        const suggest = net > 0 ? mrpLot(net, +p.moq || 0) : 0;
+        const r = rows[code] || (rows[code] = { product: code, product_name: p.name || code, level: f.level,
+          gross_qty: 0, on_hand: sup.on_hand, reserved: sup.reserved, on_order: sup.on_order, safety_qty: (+p.safety_qty || 0),
+          net_qty: 0, moq: (+p.moq || 0), lead_time: lead, suggest_qty: 0, mrp_src: mode, bom_no: bom ? bom.no : '',
+          suggest_type: (mode === 'buy' || !bom) ? 'PR' : 'OS', need_date: f.need_date, parents: [], price: mrpPrice(code), amount: 0, memo: '' });
+        r.level = Math.min(r.level, f.level);
+        r.gross_qty = r2(r.gross_qty + f.qty);
+        r.net_qty = r2(r.net_qty + net);
+        r.suggest_qty += suggest;
+        f.parents.forEach(x => { if (r.parents.indexOf(x) < 0) r.parents.push(x); });
+        if (String(f.need_date) < String(r.need_date)) r.need_date = f.need_date;
+        if (suggest > 0) bucket[code] = avail - suggest;
+        r.amount = r2(r.suggest_qty * r.price);
+        deepest = Math.max(deepest, r.level);
+        if (suggest > 0 && bom) {
+          DB.lines('bom_lines', bom.no).forEach(l => {
+            const cd = DB.addDays(f.need_date, -lead);
+            next.push({ code: l.product, qty: r2(suggest * bomUnitUse(l)), level: level + 1,
+              need_date: cd < today ? today : cd, parents: [code] });
+          });
+        }
+      });
+      frontier = next;
+    }
+    const seq = Object.keys(rows).map(k => rows[k]).sort((a, b) => a.level - b.level || String(a.need_date).localeCompare(String(b.need_date)) || b.net_qty - a.net_qty);
+    seq.forEach((r, i) => {
+      r.lineno = i + 1;
+      r.parents = r.parents.slice(0, 4).join('、');
+      const late = UI.days(r.need_date, today);
+      r.memo = r.suggest_qty <= 0 ? '可用量已覆盖,本轮不补货'
+        : late > 0 ? `需求日已过 ${late} 天,建议加急` : `最晚下单日 ${DB.addDays(r.need_date, -r.lead_time)}`;
+    });
+    const no = DB.nextNo('mrp_run');
+    const shortage = seq.filter(r => r.net_qty > 0);
+    const run = { no, name: o.name || `${SCHEMA.MRP_DEMAND[source] || '需求'}计划 ${DB.today().slice(0, 7)}`, date: today,
+      source, horizon, warehouse: wh, levels: deepest + 1, demand_cnt: demand.length, rows_cnt: seq.length,
+      shortage_cnt: shortage.length, amount: r2(shortage.reduce((s, r) => s + r.amount, 0)),
+      planner: DB.currentUser(), status: 'computed',
+      note: o.note || `需求 ${demand.length} 项 · 展开 ${deepest + 1} 层 · 缺料 ${shortage.length} 项` };
+    DB.upsert('mrp_run', run);
+    DB.setLines('mrp_lines', no, seq);
+    DB.log('计划管理', 'MRP 运算', no, `${run.name} · ${seq.length} 行建议,缺料 ${shortage.length} 行 ¥${UI.money(run.amount)}`);
+    return run;
+  }
+  /** 下达建议:外购合并成一张采购申请,自制/委外逐件生成委外加工单并自动带出 BOM 发料行 */
+  function mrpRelease(no, linenos, o) {
+    o = o || {};
+    const run = DB.find('mrp_run', no);
+    if (!run) throw new Error('运算单不存在');
+    if (run.status === 'closed') throw new Error('本运算单已归档,不能再下达;请重新发起一轮运算');
+    const lines = DB.lines('mrp_lines', no).filter(l => linenos.indexOf(l.lineno) >= 0 && l.suggest_qty > 0 && !l.release);
+    if (!lines.length) throw new Error('请至少勾选一行有建议量且未下达的记录');
+    const wh = run.warehouse || DB.list('warehouses')[0].code;
+    const made = [];
+    const buys = lines.filter(l => l.suggest_type === 'PR');
+    if (buys.length) {
+      const prNo = DB.nextNo('purchase_req');
+      DB.upsert('purchase_req', { no: prNo, date: DB.today(), dept: '采购部', requester: run.planner || DB.currentUser(),
+        need_date: buys.reduce((m, l) => (!m || l.need_date < m ? l.need_date : m), ''),
+        reason: `MRP 建议 ${no}:${buys.length} 项外购件缺料`, approver: '', status: 'draft',
+        amount: r2(buys.reduce((s, l) => s + l.amount, 0)),
+        note: `运算口径 ${SCHEMA.MRP_DEMAND[run.source]} · 计划周期 ${run.horizon} 天` });
+      DB.setLines('pr_lines', prNo, buys.map((l, i) => ({ lineno: i + 1, product: l.product, product_name: l.product_name,
+        qty: l.suggest_qty, price: l.price, amount: r2(l.suggest_qty * l.price), memo: `MRP L${l.level} 净需求 ${l.net_qty}` })));
+      buys.forEach(l => l.release = prNo);
+      made.push(prNo);
+    }
+    const make = lines.filter(l => l.suggest_type === 'OS');
+    if (make.length) {
+      const pr = DB.find('processors', o.processor) || DB.list('processors').find(x => x.qualification === 'qualified' && x.status === 'enabled');
+      if (!pr) throw new Error('没有已核准的服务商,无法下达委外加工单');
+      make.forEach(l => {
+        const osNo = DB.nextNo('os_order');
+        const qty = l.suggest_qty;
+        DB.upsert('os_order', { no: osNo, date: DB.today(), processor: pr.code, processor_name: pr.name,
+          process_type: pr.process_type, warehouse: wh, output_product: l.product, output_name: l.product_name,
+          output_qty: qty, received_qty: 0, unit_fee: r2(pr.unit_rate || 0), fee_amount: r2(qty * (pr.unit_rate || 0)),
+          issued_amount: 0, consumed_amount: 0, total_cost: 0, need_date: l.need_date, bill: '', status: 'draft',
+          user: run.planner || DB.currentUser(), note: `MRP ${no} 建议下达 · ${l.mrp_src === 'out' ? '委外加工' : '自制装配'}` });
+        const ol = (l.bom_no ? DB.lines('bom_lines', l.bom_no) : []).map((b, i) => {
+          const q = Math.ceil(bomUnitUse(b) * qty);
+          const unit = r2((DB.find('products', b.product) || {}).cost || 0);
+          return { lineno: i + 1, product: b.product, product_name: b.product_name, qty: q, issued: 0,
+            price: unit, amount: r2(q * unit), tax_rate: 13, memo: b.position || '' };
+        });
+        DB.setLines('os_lines', osNo, ol);
+        l.release = osNo;
+        made.push(osNo);
+      });
+    }
+    DB.setLines('mrp_lines', no, DB.lines('mrp_lines', no));
+    run.status = 'dispatched';
+    run.note = (run.note ? run.note + ' / ' : '') + `${DB.today()} 下达 ${made.length} 张草稿单据(${buys.length ? buys.length + ' 项外购合并为 1 张采购申请' : '无外购'}${make.length ? ' / ' + make.length + ' 张委外加工单' : ''})`;
+    DB.upsert('mrp_run', run);
+    DB.log('计划管理', 'MRP 建议下达', no, made.join('、'));
+    return made;
+  }
+  /** 归档:结办一轮计划运算。仍有未下达建议时须显式强制,避免漏下计划单 */
+  function mrpClose(no, force) {
+    const run = DB.find('mrp_run', no);
+    if (!run) throw new Error('运算单不存在');
+    if (run.status === 'closed') throw new Error('该运算单已归档');
+    const open = DB.lines('mrp_lines', no).filter(l => (l.suggest_qty || 0) > 0 && !l.release);
+    if (open.length && !force) throw new Error(`尚有 ${open.length} 行建议未下达。确认本轮不补可强制归档。`);
+    run.status = 'closed';
+    run.note = (run.note ? run.note + ' / ' : '') + `${DB.today()} 由 ${DB.currentUser()} 归档${open.length ? `,${open.length} 行建议未下达即关闭` : ',建议已全部下达'}`;
+    DB.upsert('mrp_run', run);
+    DB.log('计划管理', 'MRP 运算归档', no, `${run.name} · ${open.length ? open.length + ' 行未下达' : '全部下达'}`);
+    return run;
+  }
+
   /* ================= 销售链路 ================= */
+  /** 毛利红线拦截:低于红线价的行必须先经改价审批,批准后回写单价才放行审核 */
+  function priceBlock(so, lines) {
+    const ap = so.price_ap ? DB.find('approval', so.price_ap) : null;
+    if (ap && ap.status === 'approved') return [];
+    const bad = priceGuard(so, lines);
+    if (!bad.length) return [];
+    const pend = DB.where('approval', a => a.module === 'price_change' && a.biz === so.no && a.status === 'pending')[0];
+    if (pend) throw new Error(`本单已挂改价审批 ${pend.no},等待销售主管裁决。`);
+    const x = bad[0];
+    throw new Error(`${bad.length} 行成交价低于毛利红线(如 ${x.product_name} 净价 ¥${UI.money(x.net)} < 红线 ¥${UI.money(x.floor)}),需在订单详情发起「申请改价」或按价目表改回报价。`);
+  }
   function saveSO(no, header, lines) {
     const t = DB.find('sales_order', no);
     if (!t) throw new Error('订单不存在');
@@ -232,17 +924,26 @@ window.ACT = (function () {
     DB.log('销售管理', '修改销售订单', no, `共 ${lines.length} 行,金额 ¥${UI.money(t.total)}`);
     return t;
   }
-  function confirmSO(no) {
+  function confirmSO(no, o) {
+    o = o || {};
     const t = DB.find('sales_order', no);
     const lines = DB.lines('so_lines', no);
     if (!lines.length) throw new Error('订单行为空,无法审核');
+    let cred = null;
+    /* 两道闸门有先后:先把价格谈妥(跌破红线须改价核准),再看信用额度是否允许放单 */
+    if (!o.skipPrice) { try { priceBlock(t, lines); } catch (e) { e.gate = 'price'; throw e; } }
+    if (!o.skipCredit) { try { cred = checkCredit(t); } catch (e) { e.gate = 'credit'; throw e; } }
     // 可用量检查(仅提示,不阻断——真实系统允许缺货审核)
     const shortage = lines.filter(l => available(l.product, t.warehouse) < l.qty);
     t.status = 'confirmed';
+    if (cred && cred.warn) {
+      t.note = (t.note ? t.note + ' / ' : '') + `信用使用率 ${(cred.rate * 100).toFixed(0)}%(预警线 ${CREDIT_WATCH * 100}%)`;
+    }
     DB.upsert('sales_order', t);
     lines.forEach(l => recomputeReserved(l.product));
-    DB.log('销售管理', '审核销售订单', no, shortage.length ? `存在 ${shortage.length} 行缺货` : '库存充足');
-    return { shortage: shortage.length };
+    DB.log('销售管理', '审核销售订单', no, cred && cred.warn ? `信用预警:审核后占用 ¥${UI.money(cred.after)} / 额度 ¥${UI.money(cred.limit)}`
+      : shortage.length ? `存在 ${shortage.length} 行缺货` : '库存充足');
+    return { shortage: shortage.length, credit: cred };
   }
   function cancelSO(no) {
     const t = DB.find('sales_order', no);
@@ -338,6 +1039,8 @@ window.ACT = (function () {
     journal(DB.today(), 'sales_receipt', no, `收到客户货款—${inv.customer_name}`, [
       { acc: '1002', debit: amt }, { acc: '1122', credit: amt, memo: '核销 ' + invNo }]);
     DB.log('财务管理', '过账收款单', no, `核销发票 ${invNo} ¥${UI.money(amt)}`);
+    const rel = releaseCredit(inv.customer, `收款单 ${no} 入账 ¥${UI.money(amt)}`);
+    if (rel.length) DB.log('销售管理', '信用额度释放', inv.customer_name, `${rel.join('、')} 因收款回到额度内,订单自动审核`);
     return no;
   }
 
@@ -365,6 +1068,10 @@ window.ACT = (function () {
     if (!['confirmed', 'partial'].includes(po.status)) throw new Error('仅已确认/部分收货的订单可以收货');
     const rows = plan.filter(p => p.qty > 0);
     if (!rows.length) throw new Error('请填写入库数量');
+    const sup = DB.find('suppliers', po.supplier) || {};
+    /* 免检供应商直接入正式仓;其余先入待检仓隔离,质检判定后才能销售/领用 */
+    const qcOn = sup.qc_policy !== 'skip';
+    const inWh = qcOn ? SCHEMA.QC_WH : po.warehouse;
     const poLines = DB.lines('po_lines', poNo);
     const gNo = DB.nextNo('gr');
     let costSum = 0;
@@ -373,16 +1080,16 @@ window.ACT = (function () {
       const prod = DB.find('products', p.product) || {};
       const unit = p.price || l.price || prod.cost || 0;
       costSum += p.qty * unit;
-      move(p.product, po.warehouse, p.qty, unit, 'po_receipt', gNo, '采购入库', '');
-      const row = DB.find('stock', p.product + '-' + po.warehouse);
+      move(p.product, inWh, p.qty, unit, 'po_receipt', gNo, qcOn ? '采购到货,入待检仓隔离' : '采购入库(免检)', '');
+      const row = DB.find('stock', p.product + '-' + inWh);
       if (row && row.cost && prod.code) { prod.cost = row.cost; DB.upsert('products', prod); }
       l.received = (l.received || 0) + p.qty;
       DB.insert('gr_lines', { doc: gNo, lineno: i + 1, product: p.product, product_name: prod.name, qty: p.qty, price: unit, amount: r2(p.qty * unit), tax_rate: prod.tax_rate || 13 });
     });
     DB.setLines('po_lines', poNo, poLines);
     DB.insert('gr', { no: gNo, date: DB.today(), po: poNo, supplier: po.supplier, supplier_name: po.supplier_name,
-      warehouse: po.warehouse, amount: r2(costSum), status: 'posted', bill: '', user: DB.currentUser(),
-      note: '货到票未到,按不含税采购成本暂估入账。' });
+      warehouse: inWh, amount: r2(costSum), status: 'posted', bill: '', iqc: '', user: DB.currentUser(),
+      note: qcOn ? '货到票未到,按不含税成本暂估入账;批次已入待检仓,待品质经理判定。' : '货到票未到,按不含税成本暂估入账;供应商免检,直接入正式仓。' });
     /* 收货即入账:借 库存商品 / 贷 应付暂估(GR/IR),不与供应商对账,票到再清算 */
     journal(DB.today(), 'gr_accrual', gNo, `采购入库暂估—${po.supplier_name}`, [
       { acc: '1405', debit: r2(costSum), memo: '货到票未到暂估入库' },
@@ -391,13 +1098,16 @@ window.ACT = (function () {
     po.status = allDone ? 'done' : (poLines.some(l => l.received > 0) ? 'partial' : 'confirmed');
     DB.upsert('purchase_order', po);
     DB.log('采购管理', '过账采购收货单', gNo, `来源 ${poNo},入库成本 ¥${UI.money(costSum)}`);
+    if (qcOn) DB.log('品质管理', '收货自动报检', createIQC(gNo), `${po.supplier_name} 质检策略「${SCHEMA.QC_POLICY[sup.qc_policy] || '抽样检验 AQL'}」,批次入待检仓`);
     return gNo;
   }
   /** 票到清算:冲销 2203 暂估 → 确认进项税与应付,发票价与暂估的差异及资本化运费回写存货成本 */
   function createBillFromGR(grNo, plan) {
     const gr = DB.find('gr', grNo);
     if (!gr) throw new Error('收货单不存在');
-    if (gr.status === 'settled' || DB.list('bill').some(b => b.gr === grNo)) throw new Error('该收货单已清算,不能重复开票');
+    if (gr.status !== 'posted') throw new Error('该收货单已' + (gr.status === 'returned' ? '拒收退货结案' : '票到清算') + ',不能重复开票');
+    const dup = DB.where('bill', b => b.gr === grNo)[0];
+    if (dup) throw new Error(`收货单 ${grNo} 已生成采购账单 ${dup},不能重复清算`);
     plan = plan || {};
     const grLines = DB.lines('gr_lines', grNo);
     /* 发票数量必须与收货一致:数量差异应走采购退货或补货单,不允许在账单里改 */
@@ -468,11 +1178,17 @@ window.ACT = (function () {
   function approvePR(no, ok, memo) {
     const t = DB.find('purchase_req', no);
     if (!['pending', 'draft'].includes(t.status)) throw new Error('仅待审批的申请可以审批');
+    const ap = t.approval ? DB.find('approval', t.approval) : null;
+    if (ap && ap.status === 'pending') {
+      const r = decideApproval(ap.no, ok, memo);
+      return { staged: r.status === 'pending', ap: r };
+    }
     t.status = ok ? 'approved' : 'rejected';
     t.approver = DB.currentUser();
     t.note = memo || t.note;
     DB.upsert('purchase_req', t);
     DB.log('采购管理', ok ? '审批通过采购申请' : '驳回采购申请', no, memo || '');
+    return { staged: false };
   }
   function prToPO(no) {
     const pr = DB.find('purchase_req', no);
@@ -489,6 +1205,171 @@ window.ACT = (function () {
     pr.status = 'converted'; DB.upsert('purchase_req', pr);
     DB.log('采购管理', '采购申请转订单', poNo, '来源申请 ' + no);
     return poNo;
+  }
+
+  /* ================= 来料检验 IQC ================= */
+  const IQC_LABEL = { to_check: '待检验', pass: '合格放行', concession: '让步接收', reject: '拒收退货' };
+  /** GB/T 2828.1 一般检验水平 II · AQL=1.0 的简化抽样档位:[批量上限, 抽检数, 允收不合格数] */
+  function samplePlan(qty) {
+    const q = Math.max(0, Math.round(+qty || 0));
+    const band = SCHEMA.AQL_PLAN.filter(b => q <= b[0])[0] || SCHEMA.AQL_PLAN[SCHEMA.AQL_PLAN.length - 1];
+    return { sample: Math.min(q, band[1]) || 1, acc: band[2] };
+  }
+  /** 收货自动报检:按收货行生成抽检基数与允收数,批次停留在待检仓 */
+  function createIQC(grNo, date) {
+    const gr = DB.find('gr', grNo);
+    if (!gr) throw new Error('收货单不存在');
+    if (gr.iqc && DB.find('iqc', gr.iqc)) return gr.iqc;
+    const gl = DB.lines('gr_lines', grNo);
+    if (!gl.length) throw new Error('收货单没有明细,无法报检');
+    const no = DB.nextNo('iqc');
+    /* 例外报检:免检批次实物已在正式仓,先同价隔离进待检仓,数量与存货总额不变 */
+    if (gr.warehouse !== SCHEMA.QC_WH) {
+      const from = gr.warehouse;
+      const short = gl.filter(l => { const s = DB.find('stock', l.product + '-' + from); return !s || s.qty < l.qty; });
+      if (short.length) throw new Error(`${short[0].product_name} 在 ${from} 已出库,无法补报检`);
+      gl.forEach(l => {
+        move(l.product, from, -l.qty, l.price, 'iqc_hold', no, '例外报检,批次隔离', SCHEMA.QC_WH);
+        move(l.product, SCHEMA.QC_WH, l.qty, l.price, 'iqc_hold', no, '例外报检,批次隔离', from);
+      });
+      gr.warehouse = SCHEMA.QC_WH;
+    }
+    let qtyIn = 0, sample = 0, accSum = 0, amount = 0;
+    const rows = gl.map((l, i) => {
+      const sp = samplePlan(l.qty);
+      qtyIn += l.qty; sample += sp.sample; accSum += sp.acc; amount = r2(amount + (l.amount || 0));
+      return { doc: no, lineno: i + 1, product: l.product, product_name: l.product_name, qty: l.qty,
+        price: l.price, amount: l.amount, sample: sp.sample, acc: sp.acc, defect: 0, defect_code: '', verdict: '待检验' };
+    });
+    const po = DB.find('purchase_order', gr.po) || {};
+    DB.insert('iqc', { no, date: date || DB.today(), gr: grNo, po: gr.po, supplier: gr.supplier, supplier_name: gr.supplier_name,
+      warehouse: SCHEMA.QC_WH, target_wh: po.warehouse || '', qty_in: qtyIn, sample_qty: sample, defect_qty: 0, acc_qty: accSum,
+      amount, status: 'to_check', discount: 0, claim: 0, penalty: 0, inspector: '', judged_at: '',
+      standard: 'GB/T 2828.1 一般检验水平 II · AQL=1.0', opinion: '',
+      note: '收货自动生成报检单,批次在待检仓隔离,判定前不可销售与领用。' });
+    DB.setLines('iqc_lines', no, rows);
+    gr.iqc = no; DB.upsert('gr', gr);
+    return no;
+  }
+  /** 检验裁决三分支:合格放行转正品 / 让步接收折价冲减暂估 / 拒收退货冲销暂估并释放订单行 */
+  function judgeIQC(no, o) {
+    assertOpen(DB.today(), '来料检验判定');
+    o = o || {};
+    const a = DB.find('iqc', no);
+    if (!a) throw new Error('检验单不存在');
+    if (a.status !== 'to_check') throw new Error('该批次已判定为「' + (IQC_LABEL[a.status] || a.status) + '」,不能重复裁决');
+    const gr = DB.find('gr', a.gr) || {};
+    const lines = DB.lines('iqc_lines', no);
+    const result = o.result;
+    if (['pass', 'concession', 'reject'].indexOf(result) < 0) throw new Error('请选择检验结论');
+    const target = String(o.target_wh || a.target_wh || '').trim();
+    const wh = DB.find('warehouses', target);
+    if (result !== 'reject' && (!wh || wh.kind === 'qc' || target === SCHEMA.QC_WH)) throw new Error('放行仓需选择待检仓以外的正式仓');
+    const defects = o.defects || {};
+    let defectTotal = 0, over = false;
+    lines.forEach(l => {
+      const d = Math.max(0, Math.round(+(defects[l.product] || 0)));
+      if (d > l.qty) throw new Error(`${l.product_name} 不合格数不能大于到货数量`);
+      defectTotal += d;
+      if (d > (l.acc || 0)) over = true;
+    });
+    if (result === 'pass' && over) throw new Error('抽检不合格数已超过 AQL 允收数,整批只能让步接收或拒收');
+    const discount = result === 'concession' ? r2(+o.discount || 0) : 0;
+    if (result === 'concession') {
+      if (!(discount > 0 && discount < 30)) throw new Error('让步接收需填写 0–30% 之间的折价率');
+      if (gr.status !== 'posted') throw new Error(`收货单 ${gr.no} 已${gr.status === 'returned' ? '拒收结案' : '票到清算'},折价请改走供应商贷项通知单,不在检验单处理`);
+    }
+    /* 合格与让步:两腿同价互转,数量与存货总额都不变,只是脱离隔离区 */
+    if (result !== 'reject') lines.forEach(l => {
+      move(l.product, SCHEMA.QC_WH, -l.qty, l.price, 'iqc_pass', no, IQC_LABEL[result], target);
+      move(l.product, target, l.qty, l.price, 'iqc_pass', no, IQC_LABEL[result], SCHEMA.QC_WH);
+    });
+    let concession = 0, claim = 0;
+    if (result === 'concession') {
+      concession = r2(a.amount * discount / 100);
+      /* 折价按行分摊回放行仓成本,末行兜尾差;同时冲减应付暂估,库存子账与 1405 保持同源 */
+      let booked = 0;
+      lines.forEach((l, i) => {
+        const d = i === lines.length - 1 ? r2(concession - booked) : r2((l.amount || 0) * discount / 100);
+        booked = r2(booked + d);
+        valueAdj(l.product, target, -d, 'bill_diff', no, `让步接收折价 ${discount}%`);
+      });
+      journal(DB.today(), 'gr_accrual', no, `来料让步折价冲减暂估—${a.supplier_name}`, [
+        { acc: '2203', debit: concession }, { acc: '1405', credit: concession }]);
+      gr.amount = r2((gr.amount || 0) - concession);
+      claim = concession;
+    }
+    if (result === 'reject') {
+      lines.forEach(l => move(l.product, SCHEMA.QC_WH, -l.qty, l.price, 'iqc_reject', no, '质检拒收,实物退回供应商', ''));
+      claim = r2(o.claim || a.amount);
+      const back = r2(a.amount);
+      journal(DB.today(), 'gr_accrual', no, `来料拒收冲销暂估—${a.supplier_name}`, [
+        { acc: '2203', debit: back }, { acc: '1405', credit: back }]);
+      gr.amount = r2((gr.amount || 0) - back);
+      gr.status = 'returned';
+      gr.note = (gr.note ? gr.note + ' / ' : '') + `${no} 整批拒收:实物退回供应商,暂估已冲销,无需取票开票。`;
+      /* 拒收后订单行未收量释放,允许补货或转其他供应商 */
+      const poNo = gr.po || a.po;
+      const poLines = DB.lines('po_lines', poNo);
+      lines.forEach(l => poLines.forEach(pl => { if (pl.product === l.product) pl.received = Math.max(0, (pl.received || 0) - l.qty); }));
+      if (poNo && poLines.length) {
+        DB.setLines('po_lines', poNo, poLines);
+        const po = DB.find('purchase_order', poNo);
+        if (po && po.status === 'done') {
+          po.status = poLines.some(l => (l.received || 0) > 0) ? 'partial' : 'confirmed';
+          po.note = (po.note ? po.note + ' / ' : '') + `${no} 拒收 ${lines.length} 行,订单行已释放待补货`;
+          DB.upsert('purchase_order', po);
+        }
+      }
+    }
+    if (gr.no) DB.upsert('gr', gr);
+    const penalty = result === 'reject' ? 8 : result === 'concession' ? 3 : defectTotal ? 1 : 0;
+    const sup = DB.find('suppliers', a.supplier);
+    if (sup && penalty) {
+      sup.rating = Math.max(40, (sup.rating || 80) - penalty);
+      sup.note = (sup.note ? sup.note + ' / ' : '') + `${no} ${IQC_LABEL[result]},质量扣分 ${penalty},当前绩效评分 ${sup.rating}`;
+      if (sup.rating < 60) sup.status = 'disabled';
+      DB.upsert('suppliers', sup);
+    }
+    lines.forEach(l => {
+      l.defect = Math.max(0, Math.round(+(defects[l.product] || 0)));
+      l.defect_code = l.defect ? ((o.codes || {})[l.product] || o.defect_code || '外观/包装缺陷') : '';
+      l.verdict = IQC_LABEL[result] + (l.defect > (l.acc || 0) ? '(超允收)' : '');
+    });
+    DB.setLines('iqc_lines', no, lines);
+    Object.assign(a, {
+      status: result, defect_qty: defectTotal, target_wh: result === 'reject' ? '' : target,
+      discount, claim, penalty, inspector: o.inspector || DB.currentUser(), judged_at: DB.nowStr(),
+      opinion: o.opinion || defaultOpinion(result, defectTotal, discount),
+      note: result === 'reject' ? '整批拒收:实物退供应商,暂估已冲销,订单行释放待补货。'
+        : result === 'concession' ? `缺陷不影响使用,让步接收并按 ${discount}% 折价冲减暂估。`
+          : '抽检合格,批次由待检仓转入正式仓,可销售与领用。'
+    });
+    DB.upsert('iqc', a);
+    DB.log('品质管理', '出具来料检验结论', no, `${IQC_LABEL[result]} · 不合格 ${defectTotal} 件${penalty ? ' · 供应商扣 ' + penalty + ' 分' : ''}`);
+    return a;
+  }
+  function defaultOpinion(result, defect, discount) {
+    if (result === 'reject') return `抽检不合格 ${defect} 件,超 AQL 允收数,整批拒收退货并向供应商索赔。`;
+    if (result === 'concession') return `抽检不合格 ${defect} 件,缺陷限于外观且不影响使用功能,让步接收并按 ${discount}% 折价。`;
+    return `抽检不合格 ${defect} 件,在 AQL 允收数内,判定整批合格。`;
+  }
+  /** 供应商来料质量画像:合格率、缺陷率与索赔合计(即时计算,不落库) */
+  function iqcStats(supCode) {
+    const list = DB.where('iqc', a => !supCode || a.supplier === supCode);
+    const done = list.filter(a => a.status !== 'to_check');
+    const sampled = list.reduce((s, a) => s + (a.sample_qty || 0), 0);
+    const defect = list.reduce((s, a) => s + (a.defect_qty || 0), 0);
+    return {
+      batches: list.length, pending: list.length - done.length,
+      ok: done.filter(a => a.status === 'pass').length,
+      con: done.filter(a => a.status === 'concession').length,
+      rej: done.filter(a => a.status === 'reject').length,
+      passRate: done.length ? done.filter(a => a.status === 'pass').length / done.length : 0,
+      defectRate: sampled ? defect / sampled : 0,
+      claim: r2(list.reduce((s, a) => s + (a.claim || 0), 0)),
+      qcQty: DB.where('stock', s => s.warehouse === SCHEMA.QC_WH && s.qty > 0).reduce((s, r) => s + r.qty, 0)
+    };
   }
 
   /* ================= 库存动作 ================= */
@@ -551,6 +1432,129 @@ window.ACT = (function () {
     return ref;
   }
 
+  /* ================= 批次追溯 / 库位 / 召回 ================= */
+  function recalcProduct(prodCode) {
+    DB.where('stock', s => s.product === prodCode).forEach(recalc);
+  }
+  /** 批次全生命周期:收货 → 库位停留 → 出库流向(含发票与订单) */
+  function lotTrace(no) {
+    const lot = DB.find('lot', no);
+    if (!lot) throw new Error('批次不存在:' + no);
+    const txs = DB.lines('lot_tx', no);
+    const flow = txs.filter(t => t.qty < 0).map(t => {
+      const d = DB.find('delivery', t.ref) || {};
+      const inv = DB.where('invoice', i => i.delivery === t.ref)[0] || {};
+      const rma = DB.find('rma', t.ref) || {};
+      return { date: t.date, type: t.type, qty: -t.qty, doc: t.ref, warehouse: t.warehouse, bin: t.bin,
+        entity: rma.no ? 'rma' : d.no ? 'delivery' : 'stock_movements',
+        customer: d.customer || inv.customer || rma.customer || '',
+        customer_name: d.customer_name || inv.customer_name || rma.customer_name || '',
+        so: d.so || rma.so || '', invoice: inv.no || '' };
+    });
+    return { lot, txs, ins: txs.filter(t => t.qty > 0), outs: txs.filter(t => t.qty < 0), flow };
+  }
+  /** 召回影响分析:在库可拦截量 + 已发货客户清单 + 同物料未交订单 */
+  function lotRecall(no) {
+    const tr = lotTrace(no), lot = tr.lot, p = DB.find('products', lot.product) || {};
+    const shipped = tr.flow.filter(f => f.type === 'sales_delivery' || f.type === 'os_issue');
+    const byCust = {};
+    shipped.forEach(f => {
+      const r = byCust[f.customer] || (byCust[f.customer] = { code: f.customer, name: f.customer_name || '委外/其他', qty: 0, docs: [], invoices: [] });
+      r.qty += f.qty;
+      if (f.doc) r.docs.push(f.doc);
+      if (f.invoice) r.invoices.push(f.invoice);
+    });
+    const openSo = DB.where('sales_order', o => ['confirmed', 'partial'].indexOf(o.status) >= 0).map(o => {
+      const q = DB.lines('so_lines', o.no).filter(l => l.product === lot.product).reduce((s, l) => s + Math.max(0, (l.qty || 0) - (l.delivered || 0)), 0);
+      return q > 0 ? { no: o.no, date: o.date, customer: o.customer, customer_name: o.customer_name, qty: q, status: o.status } : null;
+    }).filter(Boolean);
+    const inOtherWh = DB.where('lot', l => l.product === lot.product && l.qty > 0 && l.no !== no && (l.status === 'normal' || l.status === 'frozen'));
+    return {
+      lot, product: p, shippedQty: shipped.reduce((s, f) => s + f.qty, 0),
+      inStockQty: lot.qty, inStockValue: r2(lot.qty * lot.unit_cost),
+      customers: Object.values(byCust).sort((a, b) => b.qty - a.qty), openSo, siblingLots: inOtherWh,
+      source: (() => { const g = DB.find('gr', lot.receipt); return g ? { gr: g.no, po: g.po, supplier: g.supplier, iqc: lot.iqc } : null; })()
+    };
+  }
+  /** 质量冻结:批次余量转为不可售可用量,账面数量与金额不变 */
+  function freezeLot(no, reason) {
+    const l = LOTX.setStatus(no, 'frozen', reason || '品质待判定');
+    recalcProduct(l.product);
+    DB.log('库存管理', '批次质量冻结', no, `${l.product_name} · ${l.qty} 件冻结 · ${reason || ''}`);
+    return l;
+  }
+  function releaseLot(no, reason) {
+    const l = LOTX.setStatus(no, 'normal', '');
+    recalcProduct(l.product);
+    DB.log('库存管理', '批次解冻放行', no, `${l.product_name} · ${reason || '复检合格'}`);
+    return l;
+  }
+  /** 效期巡检:到期批次转「已过效期」并从可用量中剔除 */
+  function scanLots() {
+    const hit = LOTX.ageScan();
+    const seen = {};
+    hit.forEach(n => { const l = DB.find('lot', n); if (l) seen[l.product] = 1; });
+    Object.keys(seen).forEach(recalcProduct);
+    return hit;
+  }
+  function moveLotBin(no, bin) {
+    const r = LOTX.relocate(no, bin);
+    const l = DB.find('lot', no);
+    recalcProduct(l.product);
+    DB.log('库存管理', '批次库位移位', no, `${r.from} → ${r.to}`);
+    return r;
+  }
+  /** 批次处置:过期/残次批次按批次身份定点出库;成本按该仓移动加权平均结转,与总账 1405 同源 */
+  function scrapLot(lotNo, qty, reason) {
+    const l = DB.find('lot', lotNo);
+    if (!l) throw new Error('批次不存在:' + lotNo);
+    if (!(qty > 0) || qty > l.qty) throw new Error(`处置数量需介于 1 与该批次余量 ${l.qty} 之间`);
+    const s = DB.find('stock', l.product + '-' + l.warehouse) || { qty: 0, cost: 0 };
+    if (s.qty < qty) throw new Error(`${l.product_name} 在 ${l.warehouse} 账面仅 ${s.qty} 件,不足以处置批次 ${lotNo}`);
+    const p = DB.find('products', l.product) || {};
+    const unit = s.cost || p.cost || l.unit_cost || 0;
+    const ref = 'ADJ' + DB.today().replace(/-/g, '') + '-L' + String(Date.now()).slice(-5);
+    move(l.product, l.warehouse, -qty, unit, 'manual', ref, `${reason || '批次处置'}(批次 ${lotNo})`, '', [lotNo]);
+    journal(DB.today(), 'stock_adjust', ref, `批次处置—${l.product_name} ${lotNo}`,
+      [{ acc: '5401', debit: r2(qty * unit), memo: reason || '批次处置' }, { acc: '1405', credit: r2(qty * unit) }]);
+    recomputeReserved(l.product);
+    DB.log('库存管理', '批次处置出库', lotNo, `${l.product_name} -${qty} 件 ¥${r2(qty * unit)} · ${reason || ''}`);
+    return { ref: ref, amount: r2(qty * unit) };
+  }
+  /** 让步接收:批次入账成本随折价下调(仅批次口径,总账折价走 valueAdj) */
+  function cutLotCost(refNo, product, delta) {
+    DB.where('lot', l => l.receipt === refNo && l.product === product && l.qty > 0).forEach(l => {
+      l.unit_cost = r2(Math.max(0, l.unit_cost - (l.qty ? delta / l.qty : 0)));
+      l.value = r2(l.qty * l.unit_cost);
+      l.note = (l.note ? l.note + ' / ' : '') + '让步接收折价,批次成本下调';
+      DB.upsert('lot', l);
+    });
+  }
+  /** 出库批次分配预览:FEFO 试算,不落账 */
+  function allocPreview(prodCode, whCode, qty) {
+    return LOTX.candidates(prodCode, whCode, false).reduce((acc, l) => {
+      if (acc.used >= qty) return acc;
+      const q = Math.min(l.qty, qty - acc.used);
+      acc.rows.push({ lot: l.no, bin: l.bin, qty: q, expire_date: l.expire_date, receipt_date: l.receipt_date });
+      acc.used += q;
+      return acc;
+    }, { rows: [], used: 0, short: 0 }).rows;
+  }
+  /** 库位实时占用:按库位汇总批次余量与金额 */
+  function binMap(whCode) {
+    const rows = {};
+    DB.list('bins').filter(b => !whCode || b.warehouse === whCode).forEach(b => {
+      rows[b.code] = { code: b.code, warehouse: b.warehouse, zone: b.zone, capacity: b.capacity || 0, lots: 0, qty: 0, value: 0, frozen: 0 };
+    });
+    DB.where('lot', l => l.qty > 0).forEach(l => {
+      const r = rows[l.bin];
+      if (!r) return;
+      r.lots++; r.qty += l.qty; r.value = r2(r.value + l.qty * l.unit_cost);
+      if (l.status !== 'normal') r.frozen += l.qty;
+    });
+    return Object.values(rows).sort((a, b) => a.code < b.code ? -1 : 1);
+  }
+
   /* ================= 主数据 ================= */
   function save(entity, row, isNew) {
     const e = SCHEMA.entities[entity];
@@ -572,6 +1576,9 @@ window.ACT = (function () {
     const dup = DB.where('users', u => String(u.account || '').toLowerCase() === acc.toLowerCase() && u.code !== row.code)[0];
     if (dup) throw new Error(`登录账号「${acc}」已被「${dup.name}(${dup.code})」占用`);
     row.account = acc;
+    if (!row.role) throw new Error(`请为「${row.name || acc}」指定角色,否则权限矩阵无从判定`);
+    if (!DB.where('role', r => r.name === row.role).length) throw new Error(`角色「${row.role}」在权限体系中不存在,请先在角色定义中创建`);
+    if (['active', 'inactive'].indexOf(row.status) < 0) row.status = 'active';
     const pwd = String(row.pwd || '').trim();
     if (!pwd) {
       if (isNew) row.pwd = 'Sf@123456';
@@ -582,12 +1589,23 @@ window.ACT = (function () {
     row.pwd = pwd;
   }
   function autoCode(entity) {
-    const map = { products: 'HM-', customers: 'CU-', suppliers: 'SU-', warehouses: 'WH-', processors: 'OS-', role: 'ROLE-' };
+    const map = { products: 'HM-', customers: 'CU-', suppliers: 'SU-', warehouses: 'WH-', processors: 'OS-', role: 'ROLE-', users: 'EMP-' };
     const pre = map[entity];
     if (!pre) return DB.nextNo(entity);
-    let n = DB.count(entity) + 1;
+    const pk = SCHEMA.entities[entity].pk;
+    let max = 0, pad = 0;
+    DB.list(entity).forEach(r => {
+      const s = String(r[pk] || '');
+      if (s.indexOf(pre) !== 0) return;
+      const tail = s.slice(pre.length);
+      if (!/^\d+$/.test(tail)) return;
+      if (tail.length > pad) pad = tail.length;
+      if (+tail > max) max = +tail;
+    });
+    let n = (max || DB.count(entity)) + 1;
+    if (!pad) pad = 3;
     let code;
-    do { code = pre + String(1000 + n).slice(1); n++; } while (DB.find(entity, code));
+    do { code = pre + String(n).padStart(pad, '0'); n++; } while (DB.find(entity, code));
     return code;
   }
   /* 主数据被引用时禁止删除:[实体, 引用字段, 引用表] */
@@ -607,6 +1625,22 @@ window.ACT = (function () {
         return false;
       }
     }
+    if (entity === 'users') {
+      const u = DB.find('users', id) || {};
+      if (String(id) === String((DB.session() || {}).code)) { UI.toast('不能删除当前登录账号,请先切换到其他用户', 'err'); return false; }
+      if (String(u.account || '').toLowerCase() === 'admin') { UI.toast('内置管理员账号 admin 不可删除,请改用停用', 'err'); return false; }
+      const PERSON_FIELDS = ['salesperson', 'buyer', 'requester', 'handler', 'manager', 'user'];
+      const used = Object.keys(SCHEMA.entities).filter(k => !SCHEMA.entities[k].hidden && k !== 'users')
+        .map(t => { const hit = DB.where(t, r => PERSON_FIELDS.some(f => r[f] === u.name)); return hit.length ? [SCHEMA.entities[t].label, hit.length] : null; })
+        .filter(Boolean);
+      if (used.length) { UI.toast(`无法删除:「${u.name}」在${used.map(x => `${x[0]} ${x[1]} 条`).join('、')}中留痕,请改用停用`, 'err'); return false; }
+    }
+    if (entity === 'role') {
+      const r = DB.find('role', id) || {};
+      const used = DB.where('users', u => u.role === r.name).length;
+      if (used) { UI.toast(`无法删除:「${r.name}」下仍有 ${used} 名在册用户,请改派或停用`, 'err'); return false; }
+      assertPerm('role', 'edit');
+    }
     DB.remove(entity, id);
     DB.log('基础数据', '删除' + SCHEMA.entities[entity].label, id, '');
     UI.toast('已删除');
@@ -615,36 +1649,175 @@ window.ACT = (function () {
 
   /* ================= 审批中心 ================= */
   const WF = {};   // 审批裁决后回调业务单据:{ onDecide(bizNo, ok, approval) }
+  /** 信用特批:通过则自动审核订单,驳回则留在草稿等改单或转预收 */
+  WF.credit = {
+    onDecide: (biz, ok, ap) => {
+      const so = DB.find('sales_order', biz);
+      if (!so) return;
+      so.note = ((so.note || '').split(' / ').filter(x => !/信用特批|信用超额|审核将超额/.test(x)).join(' / '));
+      so.note += (so.note ? ' / ' : '') + (ok ? `信用特批 ${ap.no} 已放行,超额部分单笔授信`
+        : `信用特批 ${ap.no} 被驳回(${ap.approver || '财务'}),待回款后重新报价`);
+      so.credit_ap = ok ? ap.no : '';
+      DB.upsert('sales_order', so);
+      if (ok && so.status === 'draft') confirmSO(biz, { skipCredit: true, skipPrice: true });   // 财务级超额授信同时豁免价格红线
+      DB.log('销售管理', ok ? '信用特批放行' : '信用特批驳回', biz, `${so.customer_name} · ${ap.opinion || ''}`);
+    }
+  };
+  /** 改价审批:通过回写订单行单价并重算订单额,驳回则保留原价等销售改单 */
+  WF.price_change = { onDecide: (biz, ok, ap) => applyPriceChange(biz, ok, ap) };
+  /** 价目表核准:通过后立即进入取价引擎引用范围 */
+  WF.price_list = { onDecide: (biz, ok, ap) => applyListDecision(biz, ok, ap) };
+  /** BOM 核准:通过后父件挂上默认清单并进入 MRP 展开范围 */
+  WF.bom = { onDecide: (biz, ok, ap) => applyBomDecision(biz, ok, ap) };
+
+  /* ================= 金额分级会签 ================= */
+  /** 按金额档位逐级加签:基线岗位先签,每达到一个档位追加一个签批岗 */
+  function buildChain(module, baseRole, amount) {
+    if (SCHEMA.SIGN_MODULES.indexOf(module) < 0) return null;
+    const why = {};
+    const roles = [baseRole || '主管'];
+    SCHEMA.SIGN_TIERS.forEach(t => { if (amount >= t.min) { roles.push(t.role); why[t.role] = t.why; } });
+    return roles.filter((r, i) => roles.indexOf(r) === i)
+      .map((r, i) => Object.assign({ role: r, state: i ? 'waiting' : 'current' }, why[r] ? { tier: why[r] } : {}));
+  }
+  /** 节点截止时刻:自发起日按紧急度顺延 */
+  function nodeDue(date, priority) {
+    return DB.addDays(date, SCHEMA.SIGN_DUE[priority] || 3) + ' 18:00:00';
+  }
+  function apNode(a) { return a && a.chain && a.chain.length ? a.chain[a.step] : null; }
+  /** 当前登录人是否为该节点的签批岗;总经办(级别 ≥9)可代签任一级 */
+  function canSignRole(roleName) {
+    const r = currentRole();
+    if (!r || r.name === roleName) return { ok: true, name: DB.currentUser() };
+    if ((r.level || 0) >= 9) return { ok: true, name: DB.currentUser(), proxy: true };
+    return { ok: false, why: `本节点由「${roleName}」签批,请切换到该岗位账号(当前角色:${r.name})` };
+  }
+  /** 会签是否已逾期:待办且当前节点过了截止时刻 */
+  function apOverdue(a) {
+    if (!a || a.status !== 'pending' || !a.due) return 0;
+    return Math.max(0, UI.days(String(a.due).slice(0, 10), DB.today()));
+  }
 
   /** 发起审批:所有需要岗位分离的业务动作统一在此登记 */
   function submitApproval(module, bizNo, o) {
     o = o || {};
     const no = DB.nextNo('approval');
-    DB.insert('approval', {
+    const amount = r2(o.amount || 0);
+    const row = {
       no, date: DB.today(), module, biz: bizNo,
       title: o.title || (SCHEMA.entities[module] ? SCHEMA.entities[module].label : '') + ' ' + bizNo,
       applicant: o.applicant || DB.currentUser(), role: o.role || '主管', approver: '',
-      amount: r2(o.amount || 0), priority: o.priority || 'std', status: 'pending',
+      amount, priority: o.priority || 'std', status: 'pending',
       opinion: '', time_done: '', payload: o.payload || null, note: o.note || ''
-    });
-    DB.log('审批中心', '发起审批', no, `${o.title || module} · ${bizNo}`);
+    };
+    const chain = o.chain === false ? null : buildChain(module, row.role, amount);
+    if (chain) {
+      chain[0].due = nodeDue(row.date, row.priority);
+      row.chain = chain; row.step = 0; row.due = chain[0].due;
+    }
+    if (o.resubmit_of) row.resubmit_of = o.resubmit_of;
+    DB.insert('approval', row);
+    DB.log('审批中心', chain && chain.length > 1 ? `发起会签(共 ${chain.length} 级)` : '发起审批', no,
+      `${o.title || module} · ${bizNo}${chain && chain.length > 1 ? ' · ' + chain.map(n => n.role).join(' → ') : ''}`);
     return no;
   }
   function pendingApprovals() { return DB.where('approval', a => a.status === 'pending'); }
+  /** 会签单节点裁决:返回 'next' 表示链路继续,'final' 表示终局 */
+  function signNode(a, ok, opinion, forced) {
+    const node = apNode(a);
+    if (!node) return 'final';
+    if (!forced) {
+      const g = canSignRole(node.role);
+      if (!g.ok) throw new Error(g.why);
+      node.name = g.name;
+      if (g.proxy) node.proxy = 1;
+    } else {
+      node.name = node.name || DB.currentUser();
+      node.auto = 1;
+    }
+    node.at = DB.nowStr();
+    node.opinion = opinion || (ok ? '同意,按申请内容执行。' : '不同意,请补充资料后重新提交。');
+    node.state = ok ? 'signed' : 'rejected';
+    a.approver = node.name + (a.chain.length > 1 ? `(${node.role})` : '');
+    if (!ok) {
+      a.chain.forEach((n, i) => { if (i > a.step && n.state === 'waiting') n.state = 'skipped'; });
+      return 'final';
+    }
+    if (a.step >= a.chain.length - 1) return 'final';
+    a.step++;
+    const nx = a.chain[a.step];
+    nx.state = 'current';
+    nx.due = nodeDue(DB.today(), a.priority);   // 每级节点从上一级签完之日起重新计时
+    a.role = nx.role;
+    a.due = nx.due;
+    DB.upsert('approval', a);
+    DB.log('审批中心', `会签推进 ${a.step}/${a.chain.length}`, a.no,
+      `${node.role} 已签 → 转 ${nx.role} 签批 · 截止 ${nx.due.slice(0, 10)}`);
+    return 'next';
+  }
   /** 审批裁决:登记审批单并回调业务模块 */
-  function decideApproval(no, ok, opinion) {
+  function decideApproval(no, ok, opinion, o) {
+    o = o || {};
     const a = DB.find('approval', no);
     if (!a) throw new Error('审批单不存在');
     if (a.status !== 'pending') throw new Error(`审批单 ${no} 已于 ${a.time_done || '此前'} 处理`);
+    const chained = !!(a.chain && a.chain.length);
+    const phase = chained ? signNode(a, ok, opinion, o.force) : 'final';
+    if (phase === 'next') {
+      DB.log('审批中心', '会签流转', no, `已签 ${a.step}/${a.chain.length} 级,待 ${a.role} 裁决`);
+      return a;
+    }
     a.status = ok ? 'approved' : 'rejected';
     a.opinion = opinion || (ok ? '同意,按流程执行' : '不同意,请补充资料');
-    a.approver = DB.currentUser();
+    if (!chained) a.approver = o.force ? (a.approver || DB.currentUser()) : DB.currentUser();
     a.time_done = DB.nowStr();
+    a.due = '';
     DB.upsert('approval', a);
     const cb = WF[a.module];
     if (cb && cb.onDecide) cb.onDecide(a.biz, ok, a);
-    DB.log('审批中心', ok ? '审批通过' : '审批驳回', no, `${SCHEMA.entities.approval.fields.module.opts[a.module] || a.module} · ${a.biz}`);
+    DB.log('审批中心', ok ? '审批通过' : chained ? '会签驳回(整链终止)' : '审批驳回', no,
+      `${SCHEMA.entities.approval.fields.module.opts[a.module] || a.module} · ${a.biz}`);
     return a;
+  }
+  /* 审批类型 → 业务实体:审批中心跳转与重提回写共用 */
+  const AP_ENTITY = { product_release: 'product_release', supplier_apply: 'supplier_apply', processor_audit: 'processor_audit',
+    purchase_req: 'purchase_req', so_change: 'sales_order', price_change: 'sales_order', price_list: 'price_list', rma: 'rma',
+    os_order: 'os_order', stock_adjust: 'products', credit: 'sales_order', bom: 'bom' };
+  /* 业务单据上的审批引用字段:重提时要把指针换到新单 */
+  const AP_REF_FIELD = { credit: 'credit_ap', price_change: 'price_ap', price_list: 'ap', bom: 'ap' };
+  /** 驳回重提:原单留档,新单沿用申请内容并重建会签链 */
+  function resubmitApproval(no, o) {
+    o = o || {};
+    const src = DB.find('approval', no);
+    if (!src) throw new Error('审批单不存在');
+    if (src.status !== 'rejected') throw new Error('仅被驳回的审批单可以修改重提');
+    if (src.resubmit && DB.find('approval', src.resubmit)) throw new Error(`已重提过 ${src.resubmit},请勿重复提交`);
+    const amount = r2(o.amount == null ? src.amount : o.amount);
+    const baseRole = (src.chain && src.chain[0] && src.chain[0].role) || src.role;
+    const newNo = submitApproval(src.module, src.biz, {
+      title: o.title || src.title, applicant: o.applicant || src.applicant, role: baseRole,
+      amount, priority: o.priority || src.priority, note: o.note || src.note, payload: o.payload || src.payload,
+      resubmit_of: src.no
+    });
+    const nw = DB.find('approval', newNo);
+    nw.round = (+src.round || 1) + 1;
+    nw.summary = o.summary || src.summary;
+    DB.upsert('approval', nw);
+    src.resubmit = newNo;
+    src.note = (src.note ? src.note + ' / ' : '') + `已修改重提为 ${newNo}`;
+    DB.upsert('approval', src);
+    const ent = AP_ENTITY[src.module];
+    if (ent) {
+      const biz = DB.find(ent, src.biz);
+      if (biz) {
+        const f = AP_REF_FIELD[src.module] || 'approval';
+        if (biz[f] === src.no) biz[f] = newNo;
+        biz.note = (biz.note ? biz.note + ' / ' : '') + `驳回重提 ${newNo}(承接 ${src.no})`;
+        DB.upsert(ent, biz);
+      }
+    }
+    DB.log('审批中心', '驳回重提', newNo, `承接 ${src.no} · ${src.title}${amount !== src.amount ? ` · 金额调整为 ¥${UI.money(amount)}` : ''}`);
+    return newNo;
   }
   /** 若单据挂着待办审批,先走审批中心;否则直接落状态 */
   function decideViaApproval(entity, no, field, ok, opinion, direct) {
@@ -1194,6 +2367,13 @@ window.ACT = (function () {
     return DB.where('role', r => r.name === roleName)[0] || null;
   }
   function currentRole() { return roleOfUser(DB.currentUser()); }
+  /* 单据实体 → 权限模块:出库随销售、收货随采购、调拨盘点归库存 */
+  const ENTITY_PERM_MOD = { delivery: 'sales_order', gr: 'purchase_order', transfer: 'stock', stocktake: 'stock', bins: 'lot' };
+  /** 权限判定用的模块名;审批单按审批类型映射(信用特批归发票应收) */
+  function modOf(entity, apModule) {
+    if (entity === 'approval') return SCHEMA.APPROVAL_PERM[apModule] || apModule || 'approval';
+    return ENTITY_PERM_MOD[entity] || entity;
+  }
   /** 权限判定:角色 perms 形如 ['products:view','products:edit'] ; level>=9 视为超级权限 */
   function can(module, action) {
     const r = currentRole();
@@ -1204,7 +2384,7 @@ window.ACT = (function () {
     action = action || 'view';
     return perms.indexOf(module + ':' + action) >= 0 || perms.indexOf(module + ':*') >= 0;
   }
-  function grant(roleCode, module, action, on) {
+  function applyGrant(roleCode, module, action, on) {
     const r = DB.find('role', roleCode);
     if (!r) return;
     r.perms = r.perms || [];
@@ -1217,8 +2397,13 @@ window.ACT = (function () {
     DB.persist();
     DB.log('权限管理', on ? '授予权限' : '回收权限', roleCode, k);
   }
+  function grant(roleCode, module, action, on) {
+    assertPerm('role', 'edit');
+    applyGrant(roleCode, module, action, on);
+  }
   function grantAll(roleCode, module, on) {
-    PERM_ACTIONS.forEach(a => grant(roleCode, module, a, on));
+    assertPerm('role', 'edit');
+    PERM_ACTIONS.forEach(a => applyGrant(roleCode, module, a, on));
   }
   function assertPerm(module, action) {
     if (!can(module, action)) throw new Error(`当前用户「${DB.currentUser()}」无${SCHEMA.entities[module] ? SCHEMA.entities[module].label : module}的${action === 'approve' ? '审批' : action === 'edit' ? '编辑' : '查看'}权限`);
@@ -1251,8 +2436,24 @@ window.ACT = (function () {
   return { stockRow, recalc, move, available, recomputeReserved, journal, lineTotal, docTotal,
     saveSO, confirmSO, cancelSO, reopenSO, reopenPO, createDelivery, createInvoiceFromSO, createReceipt,
     confirmPO, cancelPO, createGR, createBillFromGR, createPayment, approvePR, prToPO,
+    createIQC, judgeIQC, samplePlan, iqcStats,
+    IQC: { create: createIQC, judge: judgeIQC, stats: iqcStats, plan: samplePlan,
+      label: s => IQC_LABEL[s] || s, WH: SCHEMA.QC_WH, pending: () => DB.where('iqc', a => a.status === 'to_check') },
     createTransfer, postStocktake, adjustStock, save, removeRow, autoCode,
+    LOT: { trace: lotTrace, recall: lotRecall, freeze: freezeLot, release: releaseLot, scan: scanLots,
+      moveToBin: moveLotBin, preview: allocPreview, bins: binMap, cutCost: cutLotCost, scrap: scrapLot, eng: LOTX,
+      hold: (p, w) => LOTX.holdQty(p, w), lotsOf: (p, w) => LOTX.candidates(p, w, false) },
+    PRICE: { pick: pricePick, guard: priceGuard, floor: priceFloor, cost: priceCost, lists: activeLists,
+      quote: listQuote, submit: submitPriceChange, block: priceBlock, soldQty,
+      listImpact, submitList: submitListApproval, retire: retireList, FLOOR: PRICE_FLOOR, KIND_TXT: KIND_TXT, WEIGHT: KIND_WEIGHT },
+    BOM: { unitUse: bomUnitUse, of: bomFor, matCost: bomMatCost, explode: bomExplode, whereUsed: bomWhereUsed,
+      depth: bomDepth, depthOf: bomDepthOf, rollCost: bomMatCostOf,
+      impact: bomImpact, submit: bomSubmit, obsolete: bomObsolete, SRC: SCHEMA.MRP_SRC, SUGGEST: SCHEMA.MRP_SUGGEST },
+    MRP: { supply: mrpSupply, price: mrpPrice, demand: mrpDemand, run: mrpRun, release: mrpRelease, close: mrpClose, lot: mrpLot,
+      DEMAND: SCHEMA.MRP_DEMAND, SUGGEST: SCHEMA.MRP_SUGGEST },
     submitApproval, decideApproval, pendingApprovals, decideViaApproval, WF,
+    SIGN: { buildChain, node: apNode, canSign: canSignRole, overdue: apOverdue, entityOf: m => AP_ENTITY[m] || '',
+      resubmit: resubmitApproval, dueDays: SCHEMA.SIGN_DUE, tiers: SCHEMA.SIGN_TIERS, modules: SCHEMA.SIGN_MODULES },
     sendRFQ, saveRFQQuotes, bestQuotes, awardRFQ, closeRFQ,
     submitRelease, decideRelease, publishRelease, offShelfRelease,
     submitApply, inspectApply, decideApply, archiveApply,
@@ -1261,5 +2462,6 @@ window.ACT = (function () {
     submitRMA, decideRMA, receiveRMA, creditRMA, refundRMA, repairRMA, closeRMA,
     requestSOChange, applySOChange, closeSO,
     periodRow, assertOpen, periodActivity, periodPnL, buildCloseLines, closePeriod, reopenPeriod,
-    PERM: { can, grant, grantAll, assertPerm, roleOfUser, currentRole, ACTIONS: PERM_ACTIONS } };
+    creditState, checkCredit, submitCreditRelease, releaseCredit, CREDIT_WATCH, CREDIT_BLOCK,
+    PERM: { can, modOf, grant, grantAll, assertPerm, roleOfUser, currentRole, ACTIONS: PERM_ACTIONS } };
 })();

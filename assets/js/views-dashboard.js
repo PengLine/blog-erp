@@ -119,8 +119,9 @@ window.DASH = (function () {
     <div class="grid g2 mt16">
       <div class="card"><div class="card-head"><h3>${icon('users')}Top 6 客户(按开票额)</h3><div class="right"><button class="btn sm ghost" data-route="customers">查看全部</button></div></div>
         <div class="card-body">${UI.hbars(topCust, { links: 'customers' })}</div></div>
-      <div class="card"><div class="card-head"><h3>${icon('warn')}库存预警</h3><div class="right"><span class="badge b-warning">${lowStock.length} 条</span></div></div>${alertHTML || `<div class="card-body">${UI.emptyBox('库存水位健康') }</div>`}
-        <div class="table-foot">${UI.cellRef('warehouses', 'WH-HZ01')} 等 ${DB.count('warehouses')} 个仓库 · 低于安全库存或缺货的 SKU 建议尽快补货</div></div>
+      <div class="card"><div class="card-head"><h3>${icon('warn')}库存预警</h3><div class="right"><span class="badge b-warning">${lowStock.length} 条</span>
+        <button class="btn sm ghost" data-route="reports/shortage">缺料分析</button></div></div>${alertHTML || `<div class="card-body">${UI.emptyBox('库存水位健康') }</div>`}
+        <div class="table-foot">${UI.cellRef('warehouses', 'WH-HZ01')} 等 ${DB.count('warehouses')} 个仓库 · 缺口按 MRP 口径可用量 = 现量 − 占用 + 在途计算</div></div>
     </div>
     <div class="grid g-2-1 mt16">
       <div class="card"><div class="card-head"><h3>${icon('file')}最近销售订单</h3><div class="right"><button class="btn sm" data-route="sales_order">进入模块</button></div></div>
@@ -156,7 +157,10 @@ window.DASH = (function () {
     const openInv = DB.where('invoice', i => i.status === 'open').length;
     const overdueBill = DB.where('bill', b => b.status === 'overdue').length;
     const openBill = DB.where('bill', b => b.status === 'open').length;
-    const grNoBill = DB.where('gr', g => !DB.where('bill', b => b.gr === g.no).length).length;
+    const grNoBill = DB.where('gr', g => g.status === 'posted' && !DB.where('bill', b => b.gr === g.no).length).length;
+    const qcWait = DB.where('iqc', a => a.status === 'to_check').length;
+    const qcQty = DB.where('stock', s => s.warehouse === SCHEMA.QC_WH && s.qty > 0).reduce((s, r) => s + r.qty, 0);
+    const qcNg = DB.where('iqc', a => a.status === 'reject' || a.status === 'concession').length;
     const low = DB.where('stock', s => s.status !== 'normal').length;
     const trDraft = DB.where('transfer', t => t.status === 'draft').length;
     const stDraft = DB.where('stocktake', t => t.status === 'draft').length;
@@ -176,6 +180,12 @@ window.DASH = (function () {
     const rmaDo = DB.where('rma', r => ['approved', 'received', 'repairing'].indexOf(r.status) >= 0).length;
     const rmaRed = DB.where('rma', r => r.status === 'received' && !r.credit_invoice).length;
     add('待办审批', apPend, '跨模块审批队列,岗位分离后回写业务单据状态', 'approvals', '去审批', 'b-danger');
+    const signOd = DB.where('approval', a => a.status === 'pending' && ACT.SIGN.overdue(a) > 0).length;
+    const signRun = DB.where('approval', a => a.status === 'pending' && (a.chain || []).length > 1).length;
+    const apBack = DB.where('approval', a => a.status === 'rejected' && !a.resubmit && ACT.SIGN.entityOf(a.module)).length;
+    add('会签节点逾期', signOd, '签批超过时限,逾期节点在审批中心置顶标红,建议催办或改派岗位', 'approvals', '去催办', 'b-danger');
+    add('分级会签在途', signRun, '按金额逐级签批,仅当前节点岗位可裁决,任一级驳回即整链终止', 'approvals', '去签批', 'b-purple');
+    add('驳回待重提', apBack, '被驳回的申请补充资料后在审批单详情「修改重提」,原单留档可追溯', 'approvals', '去重提', 'b-warning');
     add('待审核销售订单', drafts, '草稿订单需审核后才会占用库存并允许发货', 'sales_order', '去审核', 'b-neutral');
     add('订单变更申请', chgPend, '交期与优先级变更需销售主管确认,通过后回写订单', 'approvals', '去裁决', 'b-warning');
     add('待发货销售订单', wait, '已审核订单需创建出库单完成发货', 'sales_order', '去发货', 'b-primary');
@@ -184,6 +194,8 @@ window.DASH = (function () {
     add('待审核采购订单', poDraft, '草稿采购订单需下发供应商', 'purchase_order', '去审核', 'b-neutral');
     add('待收货采购订单', poWait, '到货后需录入采购收货单', 'purchase_order', '去收货', 'b-info');
     add('货到票未到待清算', grNoBill, '收货已按不含税成本暂估入账 贷2203,需录入采购发票冲销暂估', 'gr', '录入发票', 'b-purple');
+    add('来料待检验批次', qcWait, `待检仓在隔离 ${num(qcQty)} 件,品质经理判定前不可销售与领用`, 'iqc', '去判定', 'b-warning');
+    add('来料不合格待处置', qcNg, '让步接收已折价冲减暂估并扣供应商评分,拒收批次退货结案', 'suppliers', '跟进', 'b-danger');
     add('逾期未收发票', overdue, '已超出信用到期日,建议立即催收', 'invoice', '催收', 'b-danger');
     add('待收款发票', openInv, '到期未过 30 天的正常应收', 'invoice', '登记收款', 'b-warning');
     add('逾期未付账单', overdueBill, '可能影响供应商信用,请安排付款', 'bill', '去付款', 'b-danger');
@@ -201,6 +213,20 @@ window.DASH = (function () {
     add('售后待处理', rmaDo, '通过审批的工单需入库、红冲或退款', 'rma', '去处理', 'b-info');
     add('售后待红冲', rmaRed, '退货已入库但未开红字发票,应收无法冲减', 'invoice', '开红字', 'b-purple');
     add('库存预警 SKU', low, '低于安全库存或缺货,建议补货', 'stock', '查看', 'b-warning');
+    /* 计划维度:安全库存预警之后,由 MRP 给出可下达的建议 */
+    const mrpOpen = DB.where('mrp_run', r => r.status !== 'closed')
+      .reduce((s, r) => s + DB.lines('mrp_lines', r.no).filter(l => (l.suggest_qty || 0) > 0 && !l.release).length, 0);
+    add('MRP 建议待下达', mrpOpen, '运算给出的采购/委外建议下达后仍是草稿单,需采购与生产各自审批才生效', 'mrp_run', '去下达', 'b-warning');
+    const bomPend = DB.where('bom', b => b.status === 'pending').length;
+    add('待核准物料清单', bomPend, '清单核准发布后才进入 MRP 展开,拖一天子件备料就晚一天', 'bom', '去审批', 'b-info');
+    /* 批次维度:效期与质量扣留不影响账面金额,但直接压缩可售可用量 */
+    const lotHold = l => l.qty > 0 && UI.days(DB.today(), l.expire_date);
+    const lotExp = DB.where('lot', l => l.qty > 0 && l.status === 'expired');
+    const lotFrz = DB.where('lot', l => l.qty > 0 && l.status === 'frozen');
+    const lotNear = DB.where('lot', l => l.qty > 0 && l.status === 'normal' && l.expire_date && lotHold(l) >= 0 && lotHold(l) <= 90);
+    add('已过效期批次', lotExp.length, `${num(lotExp.reduce((s, l) => s + l.qty, 0))} 件仍在账面,已从可售可用量剔除,需做处置出库`, 'lot', '去处置', 'b-danger');
+    add('质量冻结批次', lotFrz.length, '复检放行需品质岗权限;批次处置按移动加权平均结转至 5401', 'lot', '复检放行', 'b-purple');
+    add('临期批次(90 天内)', lotNear.length, `涉及 ${num(lotNear.reduce((s, l) => s + l.qty, 0))} 件,FEFO 分配会自动优先出掉`, 'reports/trace', '看效期', 'b-warning');
     add('草稿调拨单', trDraft, '调拨单需过账才会产生库存流水', 'transfer', '去过账', 'b-neutral');
     add('未过账盘点单', stDraft, '录入实盘数量后过账生成盘盈盘亏', 'stocktake', '去盘点', 'b-info');
     const curMonth = DB.monthOf(DB.today());

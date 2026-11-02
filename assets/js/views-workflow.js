@@ -7,9 +7,7 @@ window.FLOW = (function () {
   const r2 = UI.round2, esc = UI.esc, money = UI.money, num = UI.num, icon = UI.icon, dateCN = UI.dateCN;
   const $ = UI.$, $$ = UI.$$;
   const MOD_LABEL = SCHEMA.entities.approval.fields.module.opts;
-  const AP_ENTITY = { product_release: 'product_release', supplier_apply: 'supplier_apply', processor_audit: 'processor_audit',
-    purchase_req: 'purchase_req', so_change: 'sales_order', price_change: 'sales_order', rma: 'rma', os_order: 'os_order', stock_adjust: 'products' };
-
+  const apEntity = m => ACT.SIGN.entityOf(m);
   const st = {
     ap: { status: 'pending', module: '', q: '', sort: null, asc: true, sel: {} },
     ord: { status: '', q: '', bucket: 'open', sort: 'required_date', asc: true },
@@ -38,6 +36,7 @@ window.FLOW = (function () {
     const all = DB.list('approval');
     const period = DB.today().slice(0, 7);
     const pend = all.filter(a => a.status === 'pending');
+    const overdue = pend.filter(a => ACT.SIGN.overdue(a) > 0);
     const mine = pend.filter(a => a.applicant === DB.currentUser());
     const decided = all.filter(a => a.status !== 'pending' && String(a.time_done || '').slice(0, 7) === period);
     const rows = apFiltered();
@@ -50,7 +49,7 @@ window.FLOW = (function () {
 
     return `
     <div class="page-head">
-      <div><h2>审批中心</h2><div class="desc">统一待办队列:新品发布、供应商准入、外协商审核、采购申请、订单变更与售后处理都汇入 <span class="mono">wf_approval</span>,裁决后自动回调业务单据。</div></div>
+      <div><h2>审批中心</h2><div class="desc">统一待办队列:资金承诺类单据按金额自动<b>分级会签</b>(≥ ¥${money(SCHEMA.SIGN_TIERS[0].min)} 加签财务经理,≥ ¥${money(SCHEMA.SIGN_TIERS[1].min)} 加签总经办),仅当前节点岗位可裁决,任一级驳回即整链终止;驳回单可<b>修改重提</b>并保留原审批留痕。</div></div>
       <div class="page-actions">
         <button class="btn" data-route="todo">${icon('clipboard')}返回待办</button>
         <button class="btn" data-route="purchase_req">${icon('file')}采购申请</button>
@@ -59,10 +58,11 @@ window.FLOW = (function () {
     </div>
     <div class="grid g4">
       ${UI.kpi({ label: '待办审批', value: num(pend.length), unit: ' 单', icon: 'clock', foot: '涉及金额 ¥' + UI.compact(pend.reduce((s, a) => s + (a.amount || 0), 0)) })}
-      ${UI.kpi({ label: '我发起的待办', value: num(mine.length), unit: ' 单', icon: 'user', color: '#0EA5E9', foot: esc(DB.currentUser()) })}
-      ${UI.kpi({ label: '本月已裁决', value: num(decided.length), unit: ' 单', icon: 'check', color: '#10B981',
-        foot: `批准 ${decided.filter(a => a.status === 'approved').length} · 驳回 ${decided.filter(a => a.status === 'rejected').length}` })}
-      ${UI.kpi({ label: '平均裁决时长', value: avgHours(decided).toFixed(1), unit: ' 小时', icon: 'trendUp', color: '#F59E0B', foot: '提交日 → 审批日(演示口径)' })}
+      ${UI.kpi({ label: '会签在途', value: num(pend.filter(a => (a.chain || []).length > 1).length), unit: ' 单', icon: 'layers', color: '#0EA5E9',
+        foot: `节点逾期 <b style="color:${overdue.length ? 'var(--danger)' : 'inherit'}">${num(overdue.length)}</b> 单 · 时限 ${SCHEMA.SIGN_DUE.std}/${SCHEMA.SIGN_DUE.urgent}/${SCHEMA.SIGN_DUE.critical} 天` })}
+      ${UI.kpi({ label: '我发起的待办', value: num(mine.length), unit: ' 单', icon: 'user', color: '#10B981', foot: esc(DB.currentUser()) })}
+      ${UI.kpi({ label: '本月已裁决', value: num(decided.length), unit: ' 单', icon: 'check', color: '#F59E0B',
+        foot: `批准 ${decided.filter(a => a.status === 'approved').length} · 驳回 ${decided.filter(a => a.status === 'rejected').length} · 平均 ${avgHours(decided).toFixed(1)} 小时` })}
     </div>
     <div class="grid g-2-1 mt16">
       <div class="card">
@@ -80,10 +80,28 @@ window.FLOW = (function () {
       <div>
         <div class="card"><div class="card-head"><h3>${icon('pie')}待办金额分布</h3></div><div class="card-body">
           ${buckets.length ? UI.donut(buckets, { centerLabel: '待办金额' }) : UI.emptyBox('没有待办审批')}</div></div>
+        <div class="card mt16"><div class="card-head"><h3>${icon('layers')}会签在途</h3><span class="sub">逐级签批链路</span></div><div class="card-body">
+          ${signingBoard()}</div></div>
         <div class="card mt16"><div class="card-head"><h3>${icon('clock')}最近裁决</h3></div><div class="card-body">
           ${recentDecided()}</div></div>
       </div>
     </div>`;
+  }
+
+  /** 会签看板:在途链路 + 节点状态 + 逾期提醒 */
+  function signingBoard() {
+    const list = DB.where('approval', a => a.status === 'pending' && (a.chain || []).length > 1)
+      .sort((x, y) => ACT.SIGN.overdue(y) - ACT.SIGN.overdue(x) || String(x.due).localeCompare(String(y.due))).slice(0, 6);
+    if (!list.length) return UI.emptyBox('没有在途的分级会签单', '资金承诺类单据金额达到档位后会自动加签');
+    return `<div class="timeline">${list.map(a => {
+      const od = ACT.SIGN.overdue(a);
+      return `<div class="tl-item ${od ? '' : 'done'}">
+        <b>${esc(MOD_LABEL[a.module] || a.module)}</b>
+        <span class="when">已签 ${a.step}/${a.chain.length} 级${od ? ` · <b style="color:var(--danger)">逾期 ${od} 天</b>` : ''}</span>
+        <p><span class="mono cell-link" data-open="approval=${encodeURIComponent(a.no)}">${esc(a.no)}</span> ¥${money(a.amount)} · 待「${esc(a.role)}」签批</p>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:6px">${a.chain.map((n, i) =>
+          `<span class="tag" style="opacity:${n.state === 'signed' || n.state === 'rejected' ? 1 : i === +a.step ? 1 : .45}">${n.state === 'signed' ? '✓' : n.state === 'rejected' ? '×' : i === +a.step ? '●' : '○'} ${esc(n.role)}</span>`).join('')}</div>
+      </div>`; }).join('')}</div>`;
   }
 
   function apTable(rows) {
@@ -92,18 +110,19 @@ window.FLOW = (function () {
         ? `<input type="checkbox" data-ap-sel="${esc(r.no)}" ${st.ap.sel[r.no] ? 'checked' : ''}>` : '<span class="muted">·</span>' },
       { k: 'no', label: '审批单号', sortable: false, render: r => `<span class="mono cell-link" data-open="approval=${encodeURIComponent(r.no)}">${esc(r.no)}</span>` },
       { k: 'module', label: '审批类型', render: r => `<span class="tag">${esc(MOD_LABEL[r.module] || r.module)}</span>` },
-      { k: 'title', label: '审批事由', render: r => `<div style="font-weight:550">${esc(r.title)}</div><div class="cell-sub">${esc((r.biz || '') + (r.role ? ' · 需 ' + r.role : ''))}</div>` },
+      { k: 'title', label: '审批事由', render: r => `<div style="font-weight:550">${esc(r.title)}</div><div class="cell-sub">${esc(r.biz || '')}${r.resubmit_of ? ` · 承接 <span class="mono cell-link" data-open="approval=${encodeURIComponent(r.resubmit_of)}">${esc(r.resubmit_of)}</span>` : ''}</div>` },
+      { k: '_sign', label: '会签进度', sortable: false, render: signCell },
       { k: 'applicant', label: '发起人', sortable: false, render: r => esc(r.applicant || '—') },
       { k: 'amount', label: '涉及金额', align: 'right', render: r => `<span class="money">¥${money(r.amount)}</span>` },
       { k: 'priority', label: '紧急度', sortable: false, render: r => r.priority === 'std' ? '<span class="muted small">普通</span>'
         : `<span class="badge ${r.priority === 'critical' ? 'b-danger' : 'b-warning'}">${r.priority === 'critical' ? '特急' : '加急'}</span>` },
       { k: 'date', label: '提交日', nowrap: true, sortable: false, render: r => `<span class="small">${dateCN(r.date)}</span>` },
-      { k: 'status', label: '状态', sortable: false, render: r => UI.badge(r.status) + (r.approver && r.status !== 'pending' ? `<div class="cell-sub">${esc(r.approver)}</div>` : '') },
+      { k: 'status', label: '状态', sortable: false, render: r => UI.badge(r.status) + (r.approver && r.status !== 'pending' ? `<div class="cell-sub">${esc(r.approver)}</div>` : '') + (r.resubmit ? `<div class="cell-sub">已重提 ${esc(r.resubmit)}</div>` : '') },
       { k: '_op', label: '操作', sortable: false, render: r => r.status === 'pending'
-        ? (apPerm(r.module)
+        ? (canDecide(r).ok
           ? `<button class="btn sm primary" data-ap="${encodeURIComponent(r.no)}|1">${icon('check')}通过</button> <button class="btn sm danger-ghost" data-ap="${encodeURIComponent(r.no)}|0">${icon('close')}驳回</button>`
-          : `<span class="muted small" title="当前角色无${MOD_LABEL[r.module] || r.module}审批权限">需 ${esc(r.role || '上级岗位')}</span>`)
-        : (r.biz && AP_ENTITY[r.module] ? `<button class="btn sm ghost" data-ap-jump="${esc(AP_ENTITY[r.module])}=${encodeURIComponent(r.biz)}">${icon('eye')}业务单据</button>` : '<span class="muted small">已归档</span>') },
+          : `<span class="muted small" title="${esc(canDecide(r).why)}">需 ${esc(nodeRole(r) || r.role || '上级岗位')}</span>`)
+        : (r.biz && apEntity(r.module) ? `<button class="btn sm ghost" data-ap-jump="${esc(apEntity(r.module))}=${encodeURIComponent(r.biz)}">${icon('eye')}业务单据</button>` : '<span class="muted small">已归档</span>') },
     ];
     return UI.table(cols, rows.slice(0, 40), { pk: 'no', sorted: st.ap.sort, asc: st.ap.asc, empty: '没有符合条件的审批单', emptySub: '切换状态或清空筛选试试' });
   }
@@ -131,7 +150,7 @@ window.FLOW = (function () {
   function askOpinion(title, sub, preset, done) {
     const fields = [{ k: 'opinion', label: '审批意见', type: 'textarea', full: true, rows: 3, required: true, def: preset }];
     UI.modal({ title, subtitle: sub, width: 'mid',
-      body: UI.form(fields, {}) + `<div class="notice mt12">${icon('info')}<div>裁决人 <b>${esc(DB.currentUser())}</b>;通过后系统自动执行业务回调:新品建档上架、供应商建档、服务商核准、申请转采购、订单变更落地、售后放行。</div></div>`,
+      body: UI.form(fields, {}) + `<div class="notice mt12">${icon('info')}<div>裁决人 <b>${esc(DB.currentUser())}</b>;会签单需逐级签批,<b>末级通过后</b>系统自动执行业务回调:新品建档上架、供应商建档、服务商核准、申请转采购、订单变更落地、售后放行;任一级驳回则整链终止。</div></div>`,
       actions: [{ label: '取消' }, { label: '确认裁决', cls: 'primary', icon: 'check', onClick: m => {
         const rd = UI.readForm(m.el, fields);
         if (!rd.ok) { UI.toast('请填写审批意见', 'err'); return false; }
@@ -139,20 +158,47 @@ window.FLOW = (function () {
       } }] });
   }
 
-  /** 审批裁决权限:审批类型先映射回业务实体,再按角色矩阵校验 */
-  function apPerm(module) {
-    return ACT.PERM.can(module === 'so_change' ? 'sales_order' : module, 'approve');
+  /** 当前签批岗(非会签单返回空) */
+  function nodeRole(r) { const n = r.status === 'pending' ? ACT.SIGN.node(r) : null; return n ? n.role : ''; }
+  /** 裁决闸门:会签单看当前节点岗位,单级审批沿用模块审批权 */
+  function canDecide(r) {
+    const role = nodeRole(r);
+    if (role) return ACT.SIGN.canSign(role);
+    return { ok: ACT.PERM.can(SCHEMA.APPROVAL_PERM[r.module] || r.module, 'approve'),
+      why: `当前角色无「${MOD_LABEL[r.module] || r.module}」的审批权限` };
+  }
+  /** 会签进度单元格:级次进度条 + 当前岗位 + 截止/逾期;未达加签档位只出单级时限 */
+  function signCell(r) {
+    const chain = r.chain || [];
+    if (chain.length < 2) {
+      const od = ACT.SIGN.overdue(r);
+      return `<span class="muted small">单级 · ${esc((chain[0] && chain[0].role) || r.role || '—')}</span>`
+        + (r.status === 'pending' && r.due ? `<div class="cell-sub">${od ? `<b style="color:var(--danger)">逾期 ${od} 天</b> · ` : ''}截止 ${esc(String(r.due).slice(0, 10))}</div>` : '');
+    }
+    const done = r.status === 'approved' ? chain.length : chain.filter(n => n.state === 'signed').length;
+    const bad = chain.some(n => n.state === 'rejected');
+    const od = ACT.SIGN.overdue(r);
+    const cur = nodeRole(r);
+    return `<div class="flex" style="gap:6px;align-items:center">
+      <span class="mono small">${done}/${chain.length}</span>
+      <span class="progress" style="flex:1;min-width:56px;height:6px"><i class="${bad ? 'bad' : od ? 'bad' : done === chain.length ? 'ok' : ''}" style="width:${Math.round(done / chain.length * 100)}%"></i></span>
+      <span class="small">${esc(cur || (bad ? '整链终止' : '已完成'))}</span></div>
+      ${r.status === 'pending' ? `<div class="cell-sub">${od ? `<b style="color:var(--danger)">逾期 ${od} 天</b> · ` : ''}截止 ${esc(String(r.due || '—').slice(0, 10))}</div>` : ''}`;
   }
 
   function decideOne(no, ok) {
     const a = DB.find('approval', no);
     if (!a) return UI.toast('审批单不存在', 'err');
-    if (!apPerm(a.module)) return UI.toast(`当前角色无「${MOD_LABEL[a.module] || a.module}」的审批权限`, 'err');
-    askOpinion((ok ? '通过' : '驳回') + ' · ' + (MOD_LABEL[a.module] || a.module), `${no} · ${a.biz || '—'} · ${a.applicant || ''}`,
+    const g = canDecide(a);
+    if (!g.ok) return UI.toast(g.why, 'err');
+    const node = nodeRole(a);
+    askOpinion((ok ? '通过' : '驳回') + ' · ' + (MOD_LABEL[a.module] || a.module),
+      `${no} · ${a.biz || '—'} · ${a.applicant || ''}${a.chain && a.chain.length > 1 ? ` · 第 ${+a.step + 1}/${a.chain.length} 级(${node})` : ''}`,
       ok ? '同意,按申请内容执行。' : '不同意,请补充资料后重新提交。', opinion => {
         try {
-          ACT.decideApproval(no, ok, opinion);
-          UI.toast(`${no} 已${ok ? '批准' : '驳回'},业务单据已同步`);
+          const r = ACT.decideApproval(no, ok, opinion);
+          UI.toast(r.status === 'pending' ? `已签 ${r.step}/${r.chain.length} 级,转「${r.role}」签批(截止 ${String(r.due).slice(0, 10)})`
+            : ok ? `${no} 已终审通过,业务单据已联动` : `${no} 已终审驳回,整链终止,请补充资料后修改重提`);
           delete st.ap.sel[no];
           APP.refresh();
         } catch (e) { UI.toast(e.message, 'err'); }
@@ -161,17 +207,21 @@ window.FLOW = (function () {
 
   function decideBulk(ok) {
     const all = Object.keys(st.ap.sel).filter(k => st.ap.sel[k] && (DB.find('approval', k) || {}).status === 'pending');
-    const list = all.filter(no => apPerm((DB.find('approval', no) || {}).module));
+    const list = all.filter(no => canDecide(DB.find('approval', no) || {}).ok);
     if (!all.length) return UI.toast('请先勾选待办审批单', 'warn');
-    if (!list.length) return UI.toast('勾选的审批单均超出当前角色的审批权限', 'err');
+    if (!list.length) return UI.toast('勾选的审批单均不在当前岗位的签批节点上', 'err');
     askOpinion(`批量${ok ? '通过' : '驳回'} ${list.length} 单`, list.join(' · ') + (all.length > list.length ? ` (跳过 ${all.length - list.length} 单无权)` : ''),
       ok ? `批量同意 ${list.length} 笔申请。` : `批量驳回 ${list.length} 笔申请。`, opinion => {
-        let done = 0, fail = 0, last = '';
+        let done = 0, staged = 0, fail = 0, last = '';
         list.forEach(no => {
-          try { ACT.decideApproval(no, ok, opinion); done++; delete st.ap.sel[no]; }
+          try {
+            const r = ACT.decideApproval(no, ok, opinion);
+            if (r.status === 'pending') staged++; else done++;
+            delete st.ap.sel[no];
+          }
           catch (e) { fail++; last = e.message; }
         });
-        UI.toast(`已${ok ? '批准' : '驳回'} ${done} 单${fail ? ` · ${fail} 单失败:${last}` : ''}`, fail ? 'warn' : 'ok');
+        UI.toast(`已终审 ${done} 单${staged ? ` · ${staged} 单转入下一级` : ''}${fail ? ` · ${fail} 单失败:${last}` : ''}`, fail ? 'warn' : 'ok');
         APP.refresh();
       });
   }
@@ -379,11 +429,12 @@ window.FLOW = (function () {
     const roles = DB.list('role');
     if (!roles.length) return `<div class="page-head"><div><h2>权限矩阵</h2><div class="desc">系统尚未初始化角色数据,请先在「系统设置」中重建演示数据。</div></div></div>`;
     const code = currentRoleCode();
-    const role = DB.find('role', code);
+    const role = DB.find('role', code) || roles[0];
     const granted = role.perms || [];
     const cur = ACT.PERM.currentRole();
     const users = DB.where('users', u => u.role === role.name);
     const superAdmin = (role.level || 0) >= 9;
+    const canEdit = ACT.PERM.can('role', 'edit');
     const totalPoints = SCHEMA.PERM_MODULES.length * 3;
 
     return `
@@ -391,8 +442,8 @@ window.FLOW = (function () {
       <div><h2>权限矩阵</h2><div class="desc">角色 × 功能模块 × 动作(查看 / 编辑 / 审批)。授权即时生效,列表动作、单据按钮与左侧导航都会读取这里。</div></div>
       <div class="page-actions">
         <button class="btn" data-route="users">${icon('users')}用户档案</button>
-        <button class="btn" data-perm-all="${esc(role.code)}|0">${icon('trash')}全部收回</button>
-        <button class="btn primary" data-perm-all="${esc(role.code)}|1">${icon('check')}全部授予</button>
+        ${canEdit ? `<button class="btn" data-perm-all="${esc(role.code)}|0">${icon('trash')}全部收回</button>
+        <button class="btn primary" data-perm-all="${esc(role.code)}|1">${icon('check')}全部授予</button>` : `<span class="badge b-plain">只读视图</span>`}
       </div>
     </div>
     <div class="card"><div class="card-body">
@@ -422,12 +473,12 @@ window.FLOW = (function () {
           const has = a => superAdmin || (granted.indexOf(m.key + ':' + a) >= 0);
           const n = ['view', 'edit', 'approve'].filter(has).length;
           return `<tr><td><span style="font-weight:550">${esc(m.label)}</span><div class="cell-sub mono">${esc(m.entity)}</div></td>
-            ${['view', 'edit', 'approve'].map(a => `<td>${permCell(m.key, a, has(a), superAdmin)}</td>`).join('')}
-            <td>${superAdmin ? '<span class="muted small">—</span>' : `<button class="btn sm ghost" data-perm-row="${esc(m.key)}|${n === 3 ? 0 : 1}">${n === 3 ? '全收回' : '全授予'}</button>`}</td>
+            ${['view', 'edit', 'approve'].map(a => `<td>${permCell(m.key, a, has(a), superAdmin, !canEdit)}</td>`).join('')}
+            <td>${superAdmin || !canEdit ? '<span class="muted small">—</span>' : `<button class="btn sm ghost" data-perm-row="${esc(m.key)}|${n === 3 ? 0 : 1}">${n === 3 ? '全收回' : '全授予'}</button>`}</td>
             <td class="muted small">${esc(PERM_HINT[m.key] || '')}</td></tr>`;
         }).join('')}
       </tbody></table></div>
-      <div class="table-foot"><span>${superAdmin ? '超级管理员角色默认拥有全部权限,单元格只读展示。' : `已授权 ${granted.length} 个权限点 · 修改后立即生效并写入操作日志`}</span></div>
+      <div class="table-foot"><span>${superAdmin ? '超级管理员角色默认拥有全部权限,单元格只读展示。' : canEdit ? `已授权 ${granted.length} 个权限点 · 修改后立即生效并写入操作日志` : `已授权 ${granted.length} 个权限点 · 当前角色只有查看权,如需调整请授予「权限管理 · 编辑」。`}</span></div>
     </div>
     <div class="grid g2 mt16">
       <div class="card"><div class="card-head"><h3>${icon('users')}${esc(role.name)} 成员</h3></div>
@@ -442,8 +493,9 @@ window.FLOW = (function () {
     </div>`;
   }
 
-  function permCell(module, action, on, ro) {
+  function permCell(module, action, on, ro, locked) {
     if (ro) return `<span class="badge b-success">默认允许</span>`;
+    if (locked) return `<span class="badge ${on ? 'b-success' : 'b-plain'}">${on ? '允许' : '禁止'}</span>`;
     return `<span class="chip ${on ? 'on' : ''}" style="height:26px;padding:0 10px;cursor:pointer" data-perm="${esc(module)}|${action}|${on ? 0 : 1}">${on ? '允许' : '禁止'}</span>`;
   }
 
@@ -460,12 +512,12 @@ window.FLOW = (function () {
     $$('.chip[data-chip]', root).forEach(c => c.addEventListener('click', () => { st.perm.role = c.dataset.chip; APP.render(); }));
     $$('[data-perm]', root).forEach(c => c.addEventListener('click', () => {
       const p = c.dataset.perm.split('|');
-      ACT.PERM.grant(currentRoleCode(), p[0], p[1], p[2] === '1');
+      try { ACT.PERM.grant(currentRoleCode(), p[0], p[1], p[2] === '1'); } catch (e) { return UI.toast(e.message, 'err'); }
       APP.render();
     }));
     $$('[data-perm-row]', root).forEach(b => b.addEventListener('click', () => {
       const p = b.dataset.permRow.split('|');
-      ACT.PERM.grantAll(currentRoleCode(), p[0], p[1] === '1');
+      try { ACT.PERM.grantAll(currentRoleCode(), p[0], p[1] === '1'); } catch (e) { return UI.toast(e.message, 'err'); }
       APP.render();
     }));
     $$('[data-perm-all]', root).forEach(b => b.addEventListener('click', () => {
@@ -473,10 +525,10 @@ window.FLOW = (function () {
       const on = p[1] === '1';
       if (!on) return UI.modal({ title: '收回全部权限', body: `<div class="notice warn">${icon('warn')}<div>收回后该角色用户在系统中将无法查看与操作业务模块,仅适合演示权限隔离。</div></div>`,
         actions: [{ label: '取消' }, { label: '确认收回', cls: 'danger-ghost', icon: 'trash', onClick: () => {
-          SCHEMA.PERM_MODULES.forEach(m => ACT.PERM.grantAll(p[0], m.key, false));
+          try { SCHEMA.PERM_MODULES.forEach(m => ACT.PERM.grantAll(p[0], m.key, false)); } catch (e) { UI.toast(e.message, 'err'); return; }
           UI.toast('已收回全部功能权限'); APP.refresh();
         } }] });
-      SCHEMA.PERM_MODULES.forEach(m => ACT.PERM.grantAll(p[0], m.key, true));
+      try { SCHEMA.PERM_MODULES.forEach(m => ACT.PERM.grantAll(p[0], m.key, true)); } catch (e) { return UI.toast(e.message, 'err'); }
       UI.toast('已授予全部功能权限'); APP.refresh();
     }));
     const sim = $('[data-perm-sim]', root);

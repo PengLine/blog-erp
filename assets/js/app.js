@@ -17,6 +17,7 @@
     { group: '商品管理', items: [
       { id: 'products', label: '商品 / 物料', icon: 'box' },
       { id: 'customers', label: '客户档案', icon: 'users' },
+      { id: 'price_list', label: '价目表 / 价格策略', icon: 'wallet' },
     ] },
     { group: '订单管理', items: [
       { id: 'sales_order', label: '销售订单', icon: 'file' },
@@ -27,12 +28,18 @@
     { group: '售后管理', items: [
       { id: 'rma', label: '售后工单', icon: 'refresh' },
     ] },
+    { group: '计划管理', items: [
+      { id: 'bom', label: '物料清单 BOM', icon: 'layers' },
+      { id: 'mrp_run', label: 'MRP 计划运算', icon: 'zap' },
+      { id: 'reports/shortage', label: '缺料与长周期分析', icon: 'warn' },
+    ] },
     { group: '采购管理', items: [
       { id: 'purchase_req', label: '采购申请', icon: 'clipboard' },
       { id: 'supplier_apply', label: '供应商准入申请', icon: 'user' },
       { id: 'suppliers', label: '供应商档案', icon: 'truck' },
       { id: 'purchase_order', label: '采购订单', icon: 'file' },
       { id: 'gr', label: '采购收货单', icon: 'download' },
+      { id: 'iqc', label: '来料检验 IQC', icon: 'shield' },
       { id: 'bill', label: '采购账单 / 应付', icon: 'receipt' },
       { id: 'payment', label: '付款单', icon: 'card' },
     ] },
@@ -43,6 +50,8 @@
     ] },
     { group: '库存管理', items: [
       { id: 'warehouses', label: '仓库与库位', icon: 'home' },
+      { id: 'bins', label: '库位主档', icon: 'grid' },
+      { id: 'lot', label: '批次台账', icon: 'shield' },
       { id: 'stock', label: '库存现量', icon: 'layers' },
       { id: 'stock_movements', label: '出入库流水', icon: 'swap' },
       { id: 'transfer', label: '库存调拨', icon: 'swap' },
@@ -53,12 +62,15 @@
       { id: 'journal', label: '记账凭证', icon: 'book' },
       { id: 'reports/close', label: '期末处理与结账', icon: 'lock' },
       { id: 'reports/ar', label: '应收账龄分析', icon: 'chart' },
+      { id: 'reports/credit', label: '客户信用风险', icon: 'warn' },
       { id: 'reports/ap', label: '应付账龄分析', icon: 'chart' },
     ] },
     { group: '报表分析', items: [
       { id: 'reports/sales', label: '销售分析', icon: 'trendUp' },
       { id: 'reports/purchase', label: '采购分析', icon: 'trendDown' },
       { id: 'reports/inventory', label: '库存与周转', icon: 'pie' },
+      { id: 'reports/trace', label: '批次追溯与召回', icon: 'search' },
+      { id: 'reports/pricing', label: '价格策略与毛利', icon: 'wallet' },
       { id: 'reports/pl', label: '利润表', icon: 'grid' },
     ] },
     { group: '权限管理', items: [
@@ -77,7 +89,8 @@
   const state = { route: 'dashboard', collapsed: false };
 
   /* 路由 → 权限模块(导航按角色可见性过滤) */
-  const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role', users: 'role', gl_account: 'journal', approval: 'product_release' };
+  const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role', users: 'role', gl_account: 'journal', approval: 'product_release',
+    delivery: 'sales_order', gr: 'purchase_order', warehouses: 'stock', stock_movements: 'stock', transfer: 'stock', stocktake: 'stock', bins: 'lot' };
   SCHEMA.PERM_MODULES.forEach(m => { if (m.entity && !PERM_ROUTE[m.entity]) PERM_ROUTE[m.entity] = m.key; });
   function canSee(route) {
     const mod = route.indexOf('reports/') === 0 ? 'reports' : PERM_ROUTE[route];
@@ -280,10 +293,11 @@
       items = [];
       NAV.forEach(g => g.items.forEach(it => {
         const route = it.id.indexOf('/') > 0 ? 'reports/' + it.id.split('/')[1] : it.id;
+        if (!canSee(route)) return;
         if (!q || it.label.toLowerCase().indexOf(q) >= 0) items.push({ kind: '菜单', icon: it.icon, title: it.label, sub: g.group, go: () => go(route) });
       }));
       if (q) {
-        const add = (entity, rows, pickField, subFn, icon) => rows.slice(0, 5).forEach(r => items.push({
+        const add = (entity, rows, pickField, subFn, icon) => canSee(entity) && rows.slice(0, 5).forEach(r => items.push({
           kind: SCHEMA.entities[entity].label, icon, title: r[pickField], sub: subFn(r), go: () => LIST.openDoc(entity, r[SCHEMA.entities[entity].pk]) }));
         add('sales_order', DB.where('sales_order', o => (o.no + o.customer_name).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.customer_name} · ¥${UI.money(o.total)}`, 'file');
         add('purchase_order', DB.where('purchase_order', o => (o.no + o.supplier_name).toLowerCase().indexOf(q) >= 0), 'no', o => `${o.supplier_name} · ¥${UI.money(o.total)}`, 'file');
@@ -300,6 +314,8 @@
         add('suppliers', DB.where('suppliers', s => (s.code + s.name).toLowerCase().indexOf(q) >= 0), 'name', s => s.code + ' · ' + s.category, 'truck');
         add('products', DB.where('products', p => (p.code + p.name).toLowerCase().indexOf(q) >= 0), 'name', p => `${p.code} · 售价 ¥${UI.money(p.price)} · 库存 ${DB.where('stock', x => x.product === p.code).reduce((a, x) => a + x.qty, 0)}`, 'box');
         add('journal', DB.where('journal', j => (j.no + j.memo).toLowerCase().indexOf(q) >= 0), 'no', j => j.memo, 'book');
+        add('bom', DB.where('bom', b => (b.no + b.name + b.product + b.product_name).toLowerCase().indexOf(q) >= 0), 'no', b => `${b.name} · ${b.product_name} · ${(SCHEMA.STATUS[b.status] || {}).l || b.status}`, 'layers');
+        add('mrp_run', DB.where('mrp_run', r => (r.no + r.name + (r.note || '')).toLowerCase().indexOf(q) >= 0), 'no', r => `${r.name} · ${r.rows_cnt || 0} 行建议 · 缺料 ${r.shortage_cnt || 0}`, 'zap');
       }
       items = items.slice(0, 24); cursor = 0; paint();
     }
@@ -324,8 +340,23 @@
   /* ---------------- 启动 ---------------- */
   window.APP = { render, refresh, go, NAV, state, bindCommon, openCmdk, logoSVG, showLogin, enter, paintFoot, period: () => state.period || 30 };
 
+  /** 计划夜跑:重置演示库后自动补一轮安全库存运算,计划台账不留空白(只读运算,不落账) */
+  function nightlyPlan() {
+    const meta = DB.all().meta;
+    if (meta.mrpBootAt) return;
+    meta.mrpBootAt = DB.today();
+    if (!DB.list('mrp_run').length) {
+      try {
+        ACT.MRP.run({ source: 'safety', horizon: 30, name: `${DB.today().slice(0, 7)} 安全库存日算`,
+          note: '系统夜跑按「补至安全库存」口径生成的当日快照,供计划员复核后下达' });
+      } catch (e) { console.info('计划夜跑跳过:', e.message); }
+    }
+    DB.persist();
+  }
+
   function boot() {
     try { DB.init(); } catch (e) { console.error(e); alert('数据初始化失败:' + e.message); return; }
+    nightlyPlan();
     const h = decodeURIComponent(location.hash || '').replace(/^#\//, '');
     state.route = (h && (SCHEMA.entities[h] || ['dashboard', 'todo', 'settings', 'guide'].includes(h) || isFlow(h) || h.indexOf('reports/') === 0)) ? h : 'dashboard';
     if (!AUTH.check()) { showLogin(); paintFoot(); } else render();

@@ -28,8 +28,14 @@ window.AUTH = (function () {
   function bumpFail(account, msg) {
     const k = String(account).toLowerCase();
     const f = fails[k] || (fails[k] = { n: 0, until: 0 });
+    const who = String(account).slice(0, 40) || '-';
     f.n++;
-    if (f.n >= MAX_FAIL) { f.until = Date.now() + LOCK_MS; f.n = 0; return esc(`账号已临时锁定,请 ${Math.round(LOCK_MS / 1000)} 秒后再试。`); }
+    if (f.n >= MAX_FAIL) {
+      f.until = Date.now() + LOCK_MS; f.n = 0;
+      DB.log('系统安全', '登录失败', who, `连续 ${MAX_FAIL} 次口令校验不通过,账号临时锁定 ${Math.round(LOCK_MS / 1000)} 秒`);
+      return esc(`账号已临时锁定,请 ${Math.round(LOCK_MS / 1000)} 秒后再试。`);
+    }
+    DB.log('系统安全', '登录失败', who, `${msg}(第 ${f.n} 次尝试)`);
     return `${msg}(再失败 ${MAX_FAIL - f.n} 次将锁定 60 秒)`;
   }
 
@@ -39,12 +45,12 @@ window.AUTH = (function () {
     if (lock) return { ok: false, msg: `账号已锁定,请 ${lock} 秒后重试。` };
     const u = findUser(account);
     if (!u) return { ok: false, msg: bumpFail(account || '-', '账号或口令不正确') };
-    if (u.status === 'inactive') return { ok: false, msg: `账号「${u.account || u.code}」已停用,请联系系统管理员。` };
+    if (u.status === 'inactive') { DB.log('系统安全', '登录失败', u.account || u.code, '账号已停用,拒绝登录'); return { ok: false, msg: `账号「${u.account || u.code}」已停用,请联系系统管理员。` }; }
     if (!pwd) return { ok: false, msg: '请输入登录口令。' };
     if (String(u.pwd || '') !== String(pwd)) return { ok: false, msg: bumpFail(u.account, '账号或口令不正确') };
     delete fails[String(u.account).toLowerCase()];
     const role = DB.where('role', r => r.name === u.role)[0];
-    if (role && role.status === 'disabled') return { ok: false, msg: `角色「${role.name}」已停用,无法登录。` };
+    if (role && role.status === 'disabled') { DB.log('系统安全', '登录失败', u.account || u.code, `角色「${role.name}」已停用`); return { ok: false, msg: `角色「${role.name}」已停用,无法登录。` }; }
     const s = DB.setSession(u, role ? role.code : '');
     DB.update('users', u.code, { last_login: DB.nowStr().slice(0, 16) });
     DB.log('系统安全', '登录成功', u.account || u.code,
@@ -66,7 +72,13 @@ window.AUTH = (function () {
     try { localStorage.setItem(REMEMBER_KEY, account); } catch (e) { }
     APP.showLogin('已登出,请输入 ' + account + ' 的口令继续');
   }
-  function check() { return DB.session(); }
+  function check() {
+    const raw = DB.all().meta.session;
+    if (raw && (!raw.expires || Date.now() > raw.expires)) {
+      DB.log('系统安全', '会话过期', raw.account || raw.code || '-', `超过 ${DB.SESSION_HOURS} 小时未操作,需重新验证口令`);
+    }
+    return DB.session();
+  }
   /** 业务操作时续期,避免长时间填写单据后被踢出 */
   function keepAlive() { DB.touchSession(); }
 
@@ -116,8 +128,7 @@ window.AUTH = (function () {
   }
   function brandPanel() {
     const meta = DB.all().meta || {};
-    const st = DB.stats();
-    const docs = (st.sales_order || 0) + (st.purchase_order || 0) + (st.journal || 0);
+    const docs = ['sales_order', 'purchase_order', 'delivery', 'gr', 'invoice', 'receipt', 'bill', 'payment'].reduce((s, k) => s + DB.count(k), 0);
     return `<div class="login-brand">
       <div class="logo">${APP.logoSVG()}<div class="logo-text"><b>Sailfish ERP</b><i>Enterprise Resource Planning</i></div></div>
       <h1>一套跑得通的电商企业资源计划</h1>
@@ -126,8 +137,8 @@ window.AUTH = (function () {
       <div class="login-stats">
         <div><span>在册用户</span><b>${DB.count('users')}</b></div>
         <div><span>角色权限</span><b>${DB.count('role')}</b></div>
-        <div><span>业务单据</span><b>${UI.compact(docs)}</b></div>
-        <div><span>记账凭证</span><b>${UI.compact(st.journal || 0)}</b></div>
+        <div><span>业务单据</span><b>${docs.toLocaleString('en-US')}</b></div>
+        <div><span>记账凭证</span><b>${DB.count('journal').toLocaleString('en-US')}</b></div>
       </div></div>`;
   }
   function remembered() {
@@ -166,8 +177,7 @@ window.AUTH = (function () {
     const doLogin = () => {
       const r = attempt(acc.value, pwd.value);
       if (!r.ok) { showError(r.msg); pwd.select(); return; }
-      DB.log('系统安全', '进入系统', r.user.account || r.user.code, `角色 ${r.user.role} · 登录时间 ${DB.nowStr().slice(11, 16)}`);
-      APP.enter('dashboard');
+      APP.enter(APP.state.route || 'dashboard');
     };
     go.addEventListener('click', doLogin);
     [acc, pwd].forEach(i => i.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); }));

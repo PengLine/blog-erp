@@ -6,17 +6,24 @@ window.REPORTS = (function () {
 
   const TITLES = {
     ar: '应收账龄分析 (AR Aging)', ap: '应付账龄分析 (AP Aging)', sales: '销售分析',
-    purchase: '采购分析', inventory: '库存结构与周转', pl: '利润表 (期间损益)', close: '期末处理与结账', dashboard2: '自定义报表'
+    purchase: '采购分析', inventory: '库存结构与周转', pl: '利润表 (期间损益)', close: '期末处理与结账', dashboard2: '自定义报表',
+    credit: '客户信用风险 (Credit Control)', trace: '批次追溯与召回 (Traceability)',
+    shortage: '缺料与长周期分析 (Shortage & Lead Time)',
+    pricing: '价格策略与毛利 (Pricing & Margin)'
   };
   const DESC = {
     ar: '按发票到期日分档,口径与销售发票未结余额一致,可直接下钻至单据。',
     ap: '按账单到期日分档,反映未来现金流出的时间分布;并列出货到票未到的应付暂估(GR/IR)清算进度。',
+    credit: '按客户汇总信用额度、应收与在途占用,识别预警/超限/冻结三档风险,并跟踪信用特批的裁决动线。',
     sales: '按期间/客户/商品多维度汇总开票收入、成本与毛利。',
     purchase: '按供应商与期间汇总采购下单、收货与付款,含交付准时率。',
     inventory: '库存资金占用、库龄结构与周转率(出库成本 / 平均库存)。',
     pl: '取自制凭证账簿,收入=4001/4002 贷方发生额,成本与费用取借方发生额。',
     close: '期末三步走:试算平衡 → 损益结转至本年利润 3131 → 锁定会计期间;锁定后禁止跨期过账,反结账需财务审批权限。',
-    dashboard2: '选择实体与字段,按条件筛选并导出 CSV —— 简易报表引擎。'
+    dashboard2: '选择实体与字段,按条件筛选并导出 CSV —— 简易报表引擎。',
+    trace: '以批次为主线看效期结构、质量扣留与库位负载;支持双向追溯(供应商 → 客户)与召回影响分析。',
+    shortage: '按未履约订单与安全库存即时重算净缺口,叠加可用天数、提前期与清单覆盖,识别需要立刻下单的物料和计划盲区。',
+    pricing: '按成交日重放取价阶梯(客户专属 → 促销 → 渠道 → 类目 → 阶梯 → 标准售价),对比价目表报价、移动加权成本与毛利红线,量化让利与改价风险。'
   };
 
   function head(key, extraActions) {
@@ -101,8 +108,9 @@ window.REPORTS = (function () {
   /* 应付暂估(GR/IR):货到票未到的在途成本与票到清算差异 */
   function irBlock() {
     const today = DB.today();
-    const open = DB.list('gr').filter(g => g.status !== 'settled');
+    const open = DB.list('gr').filter(g => g.status === 'posted');
     const settled = DB.list('gr').filter(g => g.status === 'settled');
+    const returned = DB.list('gr').filter(g => g.status === 'returned');
     const irBills = DB.list('bill').filter(b => b.gr && b.accrual);
     const bookIR = r2(open.reduce((s, g) => s + (g.amount || 0), 0));
     const glIR = r2(DB.list('journal_lines').filter(l => l.account === '2203').reduce((s, l) => s + (l.credit || 0) - (l.debit || 0), 0));
@@ -124,6 +132,7 @@ window.REPORTS = (function () {
           <div>未清算暂估<b>¥${money(bookIR)}</b></div>
           <div>待清算收货单<b>${num(open.length)}<small> 张</small></b></div>
           <div>已清算收货单<b>${num(settled.length)}<small> 张</small></b></div>
+          <div>拒收退货结案<b>${num(returned.length)}<small> 张</small></b></div>
           <div>票差与运费调整存货<b style="color:${diffTotal < 0 ? 'var(--success)' : 'var(--danger)'}">${diffTotal >= 0 ? '+' : '−'}¥${money(Math.abs(diffTotal))}</b></div>
           <div>超 45 天未取票<b style="color:${aged.length ? 'var(--danger)' : 'var(--text)'}">${num(aged.length)}<small> 张</small></b></div>
         </div>
@@ -563,17 +572,559 @@ window.REPORTS = (function () {
     if (lim) lim.addEventListener('change', () => { cfgState.limit = +lim.value; APP.render(); });
   }
 
+  /* ---------------- 信用风险 ---------------- */
+  function credit() {
+    const today = DB.today();
+    const rows = DB.list('customers').filter(c => c.status === 'enabled')
+      .map(c => ACT.creditState(c.code))
+      .filter(r => r.limit > 0 || r.used > 0);
+    const sorted = rows.slice().sort((a, b) => b.rate - a.rate);
+    const totalLimit = r2(rows.reduce((s, r) => s + r.limit, 0));
+    const totalUsed = r2(rows.reduce((s, r) => s + r.used, 0));
+    const totalAr = r2(rows.reduce((s, r) => s + r.ar, 0));
+    const totalOd = r2(rows.reduce((s, r) => s + r.overdue, 0));
+    const watch = rows.filter(r => !r.hold && r.rate >= ACT.CREDIT_WATCH);
+    const blocked = rows.filter(r => r.rate >= ACT.CREDIT_BLOCK && !r.hold);
+    const frozen = rows.filter(r => r.hold);
+    const aps = DB.where('approval', a => a.module === 'credit').slice().sort((a, b) => String(a.date) < String(b.date) ? 1 : -1);
+    const pendingAP = aps.filter(a => a.status === 'pending');
+
+    const band = r => r.hold ? '信用冻结' : r.rate >= 1 ? '超限(需特批)' : r.rate >= ACT.CREDIT_WATCH ? '预警(80%+)' : '健康(<80%)';
+    const BANDS = ['健康(<80%)', '预警(80%+)', '超限(需特批)', '信用冻结'];
+    const bandSum = BANDS.map(b => r2(rows.filter(r => band(r) === b).reduce((s, r) => s + r.used, 0)));
+
+    const cols = [
+      { k: 'name', label: '客户', render: r => `<span class="cell-link cell-main" data-open="customers=${encodeURIComponent(r.code)}">${esc(r.name)}</span><div class="cell-sub mono">${esc(r.code)} · ${esc(r.terms)}</div>` },
+      { k: 'limit', label: '信用额度', align: 'right', render: r => '¥' + money(r.limit) },
+      { k: 'ar', label: '应收余额', align: 'right', render: r => '<span class="money">¥' + money(r.ar) + '</span>' + (r.open ? `<div class="cell-sub">在途 ¥${money(r.open)}</div>` : '') },
+      { k: 'used', label: '信用占用', align: 'right', render: r => `<span class="money strong">¥${money(r.used)}</span>` },
+      { k: 'free', label: '可用额度', align: 'right', render: r => `<span class="money" style="${r.free < 0 ? 'color:var(--danger)' : r.free < r.limit * .1 ? 'color:var(--warning)' : ''}">¥${money(r.free)}</span>` },
+      { k: 'rate', label: '使用率', render: r => {
+        const pct = Math.min(100, Math.round(r.rate * 100));
+        const cls = r.hold || r.rate >= ACT.CREDIT_BLOCK ? 'bad' : r.rate >= ACT.CREDIT_WATCH ? 'warn' : 'ok';
+        return `<div class="flex" style="gap:8px"><div class="progress" style="width:76px"><i class="${cls}" style="width:${pct}%"></i></div>` +
+          `<span class="small ${r.rate >= ACT.CREDIT_WATCH ? 'strong' : 'muted'}">${Math.round(r.rate * 100)}%</span></div>`;
+      } },
+      { k: 'overdue', label: '逾期货款', align: 'right', render: r => r.overdue > 0
+        ? `<span style="color:var(--danger);font-weight:600">¥${money(r.overdue)}</span><div class="cell-sub">最长 ${r.odDays} 天 · ${r.odCount} 张</div>` : '<span class="muted">—</span>' },
+      { k: 'band', label: '信用档位', render: r => UI.badge(r.hold ? 'hold' : r.rate >= ACT.CREDIT_WATCH ? 'watch' : 'normal', '') },
+    ];
+
+    return head('credit', `<button class="btn" data-route="customers">${icon('users')}客户档案</button>
+      <button class="btn ${pendingAP.length ? 'primary' : ''}" data-route="approvals">${icon('check')}信用特批${pendingAP.length ? ' ' + pendingAP.length : ''}</button>`) + `
+      <div class="grid g4">
+        ${UI.kpi({ label: '授信总额', value: '¥' + UI.compact(totalLimit), icon: 'wallet', color: '#4F46E5', foot: `${rows.length} 家在册授信客户` })}
+        ${UI.kpi({ label: '信用占用', value: '¥' + UI.compact(totalUsed), icon: 'receipt', color: '#0E7490', foot: `占用率 ${totalLimit ? (totalUsed / totalLimit * 100).toFixed(1) : 0}% · 应收 ¥${UI.compact(totalAr)}` })}
+        ${UI.kpi({ label: '预警与超限', value: num(watch.length) + '<small> 家</small>', icon: 'warn', color: '#F59E0B', foot: `其中超限 ${blocked.length} 家,须信用特批放行` })}
+        ${UI.kpi({ label: '冻结 / 逾期待收', value: num(frozen.length) + '<small> 家</small>', icon: 'lock', color: '#DC2626', foot: `逾期总额 ¥${UI.compact(totalOd)}` })}
+      </div>
+      <div class="grid g2 mt16">
+        <div class="card"><div class="card-head"><h3>${icon('chart')}占用结构(按信用档位)</h3></div><div class="card-body">
+          ${UI.hbars(BANDS.map((b, i) => ({ name: b, value: bandSum[i], color: ['#10B981', '#F59E0B', '#DC2626', '#7C2D12'][i] })), { fmt: v => '¥' + money(v) })}
+        </div></div>
+        <div class="card"><div class="card-head"><h3>${icon('info')}风控口径</h3></div><div class="card-body">
+          <ul style="margin:0;padding-left:18px;line-height:2;color:var(--text-2);font-size:13px">
+            <li><b>信用占用</b> = 未结清销售发票余额 + 已审核未开票的在途订单金额(不含税差价按价税合计计)。</li>
+            <li>使用率 ≥ <b>${Math.round(ACT.CREDIT_WATCH * 100)}%</b> 标记信用预警,销售下单前提示财务复核;审核时自动写入单据备注。</li>
+            <li>使用率 &gt; <b>${Math.round(ACT.CREDIT_BLOCK * 100)}%</b> 时销售订单审核被拦截,需在订单详情发起「信用特批」由财务经理裁决。</li>
+            <li><b>财务停售</b>(客户档案信用状态置为冻结)后,该客户任何订单审核直接拒绝,回款后由财务解除。</li>
+            <li>收款单过账会自动核销应收并回算占用;若占用回落额度内,同客户挂起的信用特批<b>自动放行</b>并审核订单。</li>
+            <li>统计基准日 ${dateCN(today)};账期由客户主数据 payment_terms 决定,逾期天数按发票到期日计算。</li>
+          </ul>
+        </div></div>
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('grid')}客户信用占用明细</h3>
+        <div class="right"><span class="muted small">按使用率倒序 · 共 ${rows.length} 家</span></div></div>
+        ${UI.table(cols, sorted, { pk: 'code', empty: '暂无授信客户' })}
+        <div class="table-foot"><span>总计</span><span class="money">¥${money(totalLimit)}</span><span class="money">¥${money(totalAr)}</span>
+          <span class="strong money">¥${money(totalUsed)}</span><span class="money" style="color:var(--danger)">¥${money(r2(totalLimit - totalUsed))}</span>
+          <span>—</span><span>—</span><span class="muted small">预警 ${watch.length} · 超限 ${blocked.length} · 冻结 ${frozen.length}</span></div>
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('check')}信用特批动线</h3>
+        <div class="right"><span class="muted small">待裁决 ${pendingAP.length} 单 · 历史 ${aps.length} 单</span></div></div>
+        ${UI.table([
+          { k: 'no', label: '特批单号', render: a => `<span class="mono cell-link" data-open="approval=${encodeURIComponent(a.no)}">${esc(a.no)}</span>` },
+          { k: 'biz', label: '销售订单', render: a => `<span class="mono cell-link" data-open="sales_order=${encodeURIComponent(a.biz)}">${esc(a.biz)}</span>` },
+          { k: 'date', label: '发起日', render: a => dateCN(a.date) },
+          { k: 'applicant', label: '发起人', render: a => esc(a.applicant) },
+          { k: 'amount', label: '订单金额', align: 'right', render: a => '¥' + money(a.amount) },
+          { k: 'note', label: '占用快照', render: a => `<span class="small muted">${esc(a.note || '')}</span>` },
+          { k: 'status', label: '结论', render: a => UI.badge(a.status) + (a.approver ? `<div class="cell-sub">${esc(a.approver)} · ${esc(a.time_done || '')}</div>` : '<div class="cell-sub">待 ' + esc(a.role || '财务经理') + '</div>') },
+        ], aps, { pk: 'no', empty: '当前没有信用特批记录;审核一张超额销售订单即可触发' })}
+      </div>
+      ${frozen.length ? `<div class="card mt16"><div class="card-head"><h3>${icon('lock')}财务停售客户</h3></div><div class="card-body">
+        ${frozen.map(r => `<div class="flex" style="gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+          <span class="cell-link cell-main" data-open="customers=${encodeURIComponent(r.code)}">${esc(r.name)}</span>
+          <span class="muted small mono">${esc(r.code)}</span>
+          <span class="muted small">占用 ¥${money(r.used)} / 额度 ¥${money(r.limit)}</span>
+          <span style="color:var(--danger);font-weight:600" class="small">逾期 ¥${money(r.overdue)} · 最长 ${r.odDays} 天</span>
+        </div>`).join('')}
+      </div></div>` : ''}`;
+  }
+
+  /* ---------------- 批次追溯与效期风险 ---------------- */
+  const traceState = { wh: '' };
+  function trace() {
+    const today = DB.today();
+    const lots = DB.list('lot');
+    const onhand = lots.filter(l => l.qty > 0);
+    const inWh = wh => wh ? onhand.filter(l => l.warehouse === wh) : onhand;
+    const scope = inWh(traceState.wh);
+    const dleft = l => l.expire_date ? UI.days(today, l.expire_date) : null;
+    const expired = scope.filter(l => l.status === 'expired');
+    const frozen = scope.filter(l => l.status === 'frozen');
+    const near = scope.filter(l => l.status === 'normal' && dleft(l) !== null && dleft(l) >= 0 && dleft(l) <= 90);
+    const q = a => a.reduce((s, l) => s + l.qty, 0);
+    const v = a => r2(a.reduce((s, l) => s + l.qty * l.unit_cost, 0));
+    const avgAge = q(scope) ? Math.round(scope.reduce((s, l) => s + l.age_days * l.qty, 0) / q(scope)) : 0;
+    const mvQty = DB.list('stock_movements').filter(m => m.qty);
+    const mvStamped = mvQty.filter(m => m.lot).length;
+
+    const buckets = [
+      { name: '已过效期', color: '#DC2626', rows: expired },
+      { name: '30 天内到期', color: '#EF4444', rows: scope.filter(l => l.status === 'normal' && dleft(l) !== null && dleft(l) <= 30) },
+      { name: '31-90 天', color: '#F59E0B', rows: scope.filter(l => l.status === 'normal' && dleft(l) > 30 && dleft(l) <= 90) },
+      { name: '91-180 天', color: '#0EA5E9', rows: scope.filter(l => l.status === 'normal' && dleft(l) > 90 && dleft(l) <= 180) },
+      { name: '180 天以上/长期', color: '#10B981', rows: scope.filter(l => l.status === 'normal' && (dleft(l) === null || dleft(l) > 180)) },
+      { name: '质量冻结', color: '#7C3AED', rows: frozen },
+    ];
+    const risky = scope.filter(l => l.status !== 'normal' || (dleft(l) !== null && dleft(l) <= 90)).sort((a, b) => (a.expire_date || '9999') < (b.expire_date || '9999') ? -1 : 1);
+    /* 数量与库存子账逐条相等;金额是两套口径(批次入账成本 vs 移动加权平均),差异如实披露 */
+    const stockRows = traceState.wh ? DB.where('stock', s => s.warehouse === traceState.wh && s.qty > 0) : DB.list('stock').filter(s => s.qty > 0);
+    const stQty = stockRows.reduce((s, x) => s + x.qty, 0);
+    const stVal = r2(stockRows.reduce((s, x) => s + (x.value || 0), 0));
+    const lotVal = v(scope);
+    const costGap = r2(lotVal - stVal);
+    const shipped = {};
+    DB.list('lot_tx').forEach(t => { if (t.qty < 0) shipped[t.doc] = (shipped[t.doc] || 0) - t.qty; });
+    const topShip = Object.keys(shipped).map(no => ({ no, qty: shipped[no], lot: DB.find('lot', no) }))
+      .filter(x => x.lot).sort((a, b) => b.qty - a.qty).slice(0, 8);
+    const whRows = DB.list('warehouses').map(w => {
+      const ls = inWh(w.code);
+      const bs = DB.where('bins', b => b.warehouse === w.code);
+      const cap = bs.reduce((s, b) => s + (b.capacity || 0), 0);
+      return { code: w.code, name: w.name, kind: w.kind, lots: ls.length, qty: q(ls), value: v(ls),
+        hold: q(ls.filter(l => l.status !== 'normal')), bins: bs.length, cap,
+        load: cap ? q(ls) / cap * 100 : 0 };
+    }).filter(r => r.lots || r.bins).sort((a, b) => b.qty - a.qty);
+
+    return head('trace', `<button class="btn" data-scan>${icon('shield')}效期巡检</button><button class="btn primary" data-action="exportReport">${icon('download')}导出台账</button>`) + `
+      <div class="grid g4">
+        ${UI.kpi({ label: '在库批次', value: num(scope.length) + '<small> 个</small>', icon: 'layers', color: '#4F46E5', foot: `累计建档 ${num(lots.length)} 个批次` })}
+        ${UI.kpi({ label: '批次口径库存', value: num(q(scope)) + '<small> 件</small>', icon: 'box', color: '#0E7490', foot: `数量与库存子账${q(scope) === stQty ? '逐条相等' : '差异 ' + num(q(scope) - stQty) + ' 件'} · 批次金额 ¥${money(lotVal)}` })}
+        ${UI.kpi({ label: '不可售扣留', value: num(q(expired) + q(frozen)) + '<small> 件</small>', icon: 'lock', color: '#DC2626', foot: `过期 ${num(q(expired))} · 冻结 ${num(q(frozen))}` })}
+        ${UI.kpi({ label: '临期 90 天内', value: num(q(near)) + '<small> 件</small>', icon: 'clock', color: '#F59E0B', foot: `${near.length} 个批次需优先出库` })}
+      </div>
+      <div class="grid g2 mt16">
+        <div class="card"><div class="card-head"><h3>${icon('clock')}效期结构(按件数)</h3>
+          <div class="right"><span class="muted small">平均库龄 ${avgAge} 天 · 加权</span></div></div>
+          <div class="card-body">${UI.hbars(buckets.map(b => ({ name: b.name, value: q(b.rows), color: b.color })), { fmt: val => num(val) + ' 件' })}</div></div>
+        <div class="card"><div class="card-head"><h3>${icon('search')}追溯入口</h3><div class="right"><span class="muted small">输入批次号直达双向追溯卡</span></div></div>
+          <div class="card-body">
+            <div class="flex" style="gap:8px"><input data-lotq placeholder="批次号,如 ${esc((lots[0] || {}).no || 'LOT2026-0001')}" style="flex:1">
+              <button class="btn primary" data-lotgo>${icon('eye')}追溯</button></div>
+            <div class="muted small mt8">留空则打开效期风险最高的批次。</div>
+            <div class="section-title mt12">发出量最多的批次(召回优先级)</div>
+            ${topShip.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>批次</th><th>物料</th><th class="right">累计发出</th><th>当前余量</th></tr></thead>
+              <tbody>${topShip.map(x => `<tr><td class="mono cell-link" data-open="lot=${encodeURIComponent(x.no)}">${esc(x.no)}</td>
+                <td>${esc(x.lot.product_name)}</td><td class="right money">${num(x.qty)}</td><td class="right money">${num(x.lot.qty)}</td></tr>`).join('')}</tbody></table></div>`
+              : '<div class="muted small">暂无批次发出记录。</div>'}
+          </div></div>
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('shield')}批次健康明细</h3>
+        <div class="right"><span class="muted small">仓库</span><select data-wh><option value="">全部仓库</option>
+          ${DB.list('warehouses').map(w => `<option value="${esc(w.code)}"${w.code === traceState.wh ? ' selected' : ''}>${esc(w.name)}</option>`).join('')}</select></div></div>
+        ${UI.table([
+          { k: 'no', label: '批次', render: l => `<span class="mono cell-link cell-main" data-open="lot=${encodeURIComponent(l.no)}">${esc(l.no)}</span>
+            <div class="cell-sub">${esc(SCHEMA.LOT_SOURCE[l.source] || l.source || '')}${l.parent ? ' · 分批自 ' + esc(l.parent) : ''}</div>` },
+          { k: 'product_name', label: '物料', render: l => `${esc(l.product_name)}<div class="cell-sub mono">${esc(l.product)}</div>` },
+          { k: 'place', label: '仓库 / 库位', render: l => `<span class="small">${esc((DB.find('warehouses', l.warehouse) || {}).name || l.warehouse)}</span>
+            <div class="cell-sub mono cell-link" data-open="bins=${encodeURIComponent(l.bin)}">${esc(l.bin || '—')}</div>` },
+          { k: 'qty', label: '余量', align: 'right', render: l => `<span class="money strong">${num(l.qty)}</span><div class="cell-sub">入库 ${num(l.qty_in)}</div>` },
+          { k: 'value', label: '批次金额', align: 'right', render: l => '¥' + money(r2(l.qty * l.unit_cost)) },
+          { k: 'age', label: '库龄', align: 'right', render: l => num(l.age_days) + ' 天' },
+          { k: 'exp', label: '到期日', render: l => l.expire_date ? `${dateCN(l.expire_date)}<div class="cell-sub" style="color:${dleft(l) < 0 ? 'var(--danger)' : dleft(l) <= 90 ? 'var(--warning)' : 'inherit'}">${dleft(l) < 0 ? '已过 ' + (-dleft(l)) + ' 天' : '剩 ' + dleft(l) + ' 天'}</div>` : '<span class="muted">长期有效</span>' },
+          { k: 'status', label: '状态', render: l => UI.badge(l.status) + (l.hold_note ? `<div class="cell-sub">${esc(l.hold_note)}</div>` : '') },
+        ], risky, { pk: 'no', empty: traceState.wh ? '该仓库暂无临期、过期或冻结批次' : '当前没有需要关注的效期或质量风险批次' })}
+        <div class="table-foot"><span>风险批次 ${risky.length} 个</span><span class="money">${num(q(risky))} 件</span><span class="money strong">¥${money(v(risky))}</span></div></div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('home')}分仓批次与库位负载</h3><div class="right"><span class="muted small">占用率 = 批次件数 / 库位标准容量</span></div></div>
+        ${UI.table([
+          { k: 'name', label: '仓库', render: w => `<span class="cell-main cell-link" data-open="warehouses=${encodeURIComponent(w.code)}">${esc(w.name)}</span>
+            <div class="cell-sub mono">${esc(w.code)} · ${esc((SCHEMA.WH_KIND[w.kind] || w.kind))}</div>` },
+          { k: 'lots', label: '在库批次', align: 'right', render: w => num(w.lots) },
+          { k: 'qty', label: '件数', align: 'right', render: w => `<span class="money strong">${num(w.qty)}</span>` },
+          { k: 'value', label: '批次金额', align: 'right', render: w => '¥' + money(w.value) },
+          { k: 'hold', label: '不可售', align: 'right', render: w => w.hold ? `<span class="badge b-danger">${num(w.hold)} 件</span>` : '<span class="muted">—</span>' },
+          { k: 'bins', label: '库位数', align: 'right', render: w => num(w.bins) },
+          { k: 'load', label: '容量占用', render: w => `<div class="flex" style="gap:8px"><div class="progress" style="width:120px"><i class="${w.load > 85 ? 'bad' : w.load > 65 ? 'warn' : 'ok'}" style="width:${Math.min(100, w.load).toFixed(1)}%"></i></div>
+            <span class="small muted">${w.load.toFixed(1)}% / ${num(w.cap)} 件</span></div>` },
+        ], whRows, { pk: 'code', empty: '暂无仓库数据' })}</div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('info')}追溯与召回口径</h3></div><div class="card-body">
+        <ul style="margin:0;padding-left:18px;line-height:2;color:var(--text-2);font-size:13px">
+          <li>批次 = 一笔入库流水建一个批次,是最小质量单元;跨仓调拨若仍有结余会拆出子批次并回指源批次。</li>
+          <li>分配规则:<b>${esc(SCHEMA.ISSUE_RULES.fefo)}</b> —— 近效期先出,其次按入库时序;冻结与已过效期批次不进入可发池。</li>
+          <li>金额口径:批次只承载<b>数量与流向</b>。Σ批次余量 = Σ库存现量(${num(q(scope))} 件 ${q(scope) === stQty ? '✓' : '✗ 差 ' + num(q(scope) - stQty) + ' 件'}),出库成本按该仓移动加权平均结转,总账 1405 与库存子账始终同源(¥${money(stVal)})。批次金额 ¥${money(lotVal)} 按各批次入账成本累计,与加权平均口径相差 <b>¥${money(Math.abs(costGap))}</b>( ${(stVal ? Math.abs(costGap) / stVal * 100 : 0).toFixed(2)}%),属成本口径差,仅作管理会计参考,不进总账。</li>
+          <li>召回三步:①冻结批次(可用量即时剔除)→ ②按流向清单通知客户并开具红字发票 → ③同物料其他批次与未结订单改派。</li>
+          <li>库区规则:正品在存储区与拣货区之间移位;待检与残次批次只能留在隔离区;跨仓移动必须走调拨单。</li>
+          <li>巡检覆盖:${num(mvQty.length)} 笔带数量的出入库流水中 ${num(mvStamped)} 笔可下钻到批次(${(mvQty.length ? mvStamped / mvQty.length * 100 : 100).toFixed(1)}%)。</li>
+        </ul></div></div>`;
+  }
+
+  function bindTrace(root) {
+    const sel = UI.$('[data-wh]', root);
+    if (sel) sel.addEventListener('change', () => { traceState.wh = sel.value; APP.render(); });
+    const sc = UI.$('[data-scan]', root);
+    if (sc) sc.addEventListener('click', () => {
+      try {
+        const hit = ACT.LOT.scan();
+        DB.log('库存管理', '批次效期巡检', '', `${hit.length} 个批次转为已过效期并从可用量剔除`);
+        UI.toast(hit.length ? `巡检完成:${hit.length} 个批次已过效期,可用量已同步剔除` : '巡检完成:未发现新的过期批次');
+        APP.render();
+      } catch (e) { UI.toast(e.message, 'err'); }
+    });
+    const go = () => {
+      const v = (UI.$('[data-lotq]', root) || {}).value;
+      const no = (v || '').trim();
+      const lot = no ? DB.find('lot', no) : DB.list('lot').filter(l => l.qty > 0).sort((a, b) => (a.expire_date || '9999') < (b.expire_date || '9999') ? -1 : 1)[0];
+      if (no && !lot) { UI.toast('批次不存在:' + no, 'err'); return; }
+      if (!lot) { UI.toast('暂无可追溯批次', 'warn'); return; }
+      DOC.open('lot', lot.no);
+    };
+    const gb = UI.$('[data-lotgo]', root); if (gb) gb.addEventListener('click', go);
+    const gi = UI.$('[data-lotq]', root);
+    if (gi) gi.addEventListener('keydown', ev => { if (ev.key === 'Enter') go(); });
+  }
+
+  /* ---------------- 缺料与长周期分析 ---------------- */
+  const shortState = { wh: '', src: '' };
+
+  /** 近 90 天真实出库速率(调拨不算消耗):把抽象的「可用量」翻译成「还能撑几天」 */
+  function burnRate(warehouse) {
+    const since = DB.addDays(DB.today(), -90);
+    const out = {};
+    DB.list('stock_movements').forEach(m => {
+      if (!(m.qty < 0) || m.type === 'transfer' || String(m.date) < since) return;
+      if (warehouse && m.warehouse !== warehouse) return;
+      out[m.product] = (out[m.product] || 0) - m.qty;
+    });
+    return out;
+  }
+
+  /** 实时重算缺料:与 MRP 引擎同一口径(净需求 = 未履约需求 + 安全库存 − 可用量),但不落单 */
+  function shortageData() {
+    const today = DB.today(), burn = burnRate(shortState.wh);
+    const gross = {};
+    ACT.MRP.demand({ source: 'so_open', horizon: 60, warehouse: shortState.wh })
+      .forEach(d => { gross[d.product] = d; });
+    const runs = DB.list('mrp_run').sort((a, b) => String(b.no).localeCompare(String(a.no)));
+    const last = runs[0] || null;
+    const sugg = {};
+    if (last) DB.lines('mrp_lines', last.no).forEach(l => { sugg[l.product] = l; });
+    const rows = DB.list('products').filter(p => p.status === 'enabled' && (!shortState.src || (p.mrp_src || 'buy') === shortState.src))
+      .map(p => {
+        const s = ACT.MRP.supply(p.code, shortState.wh);
+        const bm = ACT.BOM.of(p.code);
+        const mode = p.mrp_src || (bm ? 'make' : 'buy');
+        const g = gross[p.code] || { qty: 0, need_date: '', from: [] };
+        const safety = +p.safety_qty || 0;
+        const net = Math.max(0, r2(g.qty + safety - s.avail));
+        const lead = Math.max(1, +p.lead_time || (mode === 'buy' ? 14 : 10));
+        const daily = (burn[p.code] || 0) / 90;
+        const m = sugg[p.code];
+        return { code: p.code, name: p.name, category: p.category, mode, bm, s, safety, gross: g.qty,
+          from: (g.from || []).join('、'), need_date: g.need_date, net, lead, moq: +p.moq || 0,
+          lot: net > 0 ? ACT.MRP.lot(net, +p.moq || 0) : 0,
+          order_by: g.need_date ? DB.addDays(g.need_date, -lead) : '',
+          days: daily > 0 ? s.avail / daily : null, burn90: burn[p.code] || 0,
+          price: ACT.MRP.price(p.code), fill: r2(net * ACT.MRP.price(p.code)),
+          used_by: ACT.BOM.whereUsed(p.code).length, run_qty: m ? (+m.suggest_qty || 0) : 0, run_rel: m ? m.release : '' };
+      });
+    const short = rows.filter(r => r.net > 0)
+      .sort((a, b) => String(a.order_by || '9999').localeCompare(String(b.order_by || '9999')) || b.fill - a.fill);
+    return { today, rows, short, runs, last,
+      blind: rows.filter(r => r.mode !== 'buy' && !r.bm),
+      made: rows.filter(r => r.mode !== 'buy'),
+      late: short.filter(r => r.need_date && r.need_date < today),
+      longLead: short.filter(r => r.lead >= 21),
+      keyShort: DB.list('bom_lines').filter(l => l.key_part === 'y' && short.some(x => x.code === l.product)) };
+  }
+
+  function shortage() {
+    const d = shortageData();
+    const fillAmount = r2(d.short.reduce((s, r) => s + r.fill, 0));
+    const shortQty = r2(d.short.reduce((s, r) => s + r.net, 0));
+    const runRows = d.last ? DB.lines('mrp_lines', d.last.no) : [];
+    const runNet = r2(runRows.reduce((s, l) => s + (+l.net_qty || 0), 0));
+
+    return head('shortage', `<button class="btn primary" data-action="exportReport">${icon('download')}导出缺料清单</button>`) + `
+      <div class="grid g4">
+        ${UI.kpi({ label: '缺料物料', value: num(d.short.length) + '<small> 项</small>', icon: 'warn', color: '#DC2626',
+          foot: `净缺口 ${num(shortQty)} 件 · 补料参考 ¥${money(fillAmount)}` })}
+        ${UI.kpi({ label: '需求日已过', value: num(d.late.length) + '<small> 项</small>', icon: 'clock', color: '#EA580C',
+          foot: d.late.length ? '需加急下单或与客户改期' : '未履约需求均在可交付窗口内' })}
+        ${UI.kpi({ label: '长周期件 ≥21 天', value: num(d.longLead.length) + '<small> 项</small>', icon: 'truck', color: '#0E7490',
+          foot: '提前期越长越要提前锁定,避免评审后追单' })}
+        ${UI.kpi({ label: '计划盲区', value: num(d.blind.length) + '<small> 项</small>', icon: 'layers', color: '#7C3AED',
+          foot: `自制/委外 ${num(d.made.length)} 项,${d.blind.length ? '其中 ' + num(d.blind.length) + ' 项无生效清单' : '清单覆盖完整'}` })}
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('warn')}缺料明细(实时重算)</h3>
+        <div class="right"><span class="muted small">仓库</span>
+          <select data-swh><option value="">全部仓库</option>${DB.list('warehouses').map(w => `<option value="${esc(w.code)}"${w.code === shortState.wh ? ' selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
+          <span class="muted small" style="margin-left:10px">供应方式</span>
+          <select data-ssrc><option value="">全部</option>${Object.keys(SCHEMA.MRP_SRC).map(k => `<option value="${k}"${k === shortState.src ? ' selected' : ''}>${esc(SCHEMA.MRP_SRC[k])}</option>`).join('')}</select></div></div>
+      <div class="card-body"><div class="notice">${icon('info')}<div>可用量 = 现量 − 销售占用 + 在途采购 + 在制委外;净缺口 = 未履约需求 + 安全库存 − 可用量,与 MRP 运算同一口径。
+        本表每次打开都按当前台账<b>即时重算</b>,不落单据、不产生流水;真正下单请以 ${d.last ? `<span class="mono cell-link" data-open="mrp_run=${encodeURIComponent(d.last.no)}">${esc(d.last.no)}</span>` : '一次 MRP 运算'}的建议为准。</div></div></div>
+      ${UI.table([
+        { k: 'name', label: '物料', render: r => `<span class="cell-link cell-main" data-open="products=${encodeURIComponent(r.code)}">${esc(r.name)}</span>
+          <div class="cell-sub mono">${esc(r.code)} · ${(SCHEMA.entities.products.fields.category.opts || {})[r.category] || r.category || ''}</div>` },
+        { k: 'mode', label: '供应方式', render: r => `<span class="badge ${r.mode === 'buy' ? 'b-info' : r.mode === 'out' ? 'b-purple' : 'b-success'}">${esc(SCHEMA.MRP_SRC[r.mode])}</span>
+          ${r.bm ? `<div class="cell-sub mono"><span class="cell-link" data-open="bom=${encodeURIComponent(r.bm.no)}">${esc(r.bm.no)}</span></div>` : '<div class="cell-sub muted">无生效清单</div>'}` },
+        { k: 'avail', label: '可用量', align: 'right', render: r => `<span class="money strong">${num(r.s.avail)}</span>
+          <div class="cell-sub">现 ${num(r.s.on_hand)} · 占 ${num(r.s.reserved)} · 途 ${num(r.s.on_order)}</div>` },
+        { k: 'gross', label: '未履约需求', align: 'right', render: r => r.gross ? `<span class="money">${num(r.gross)}</span><div class="cell-sub">${esc(r.from || '销售订单')}</div>` : '<span class="muted">—</span>' },
+        { k: 'safety', label: '安全库存', align: 'right', render: r => r.safety ? `<span class="money">${num(r.safety)}</span>` : '<span class="muted">—</span>' },
+        { k: 'net', label: '净缺口', align: 'right', render: r => `<b style="color:var(--danger)" class="money">${num(r.net)}</b>
+          <div class="cell-sub">起订 ${num(r.moq)} · 建议补 ${num(r.lot)}</div>` },
+        { k: 'days', label: '可用天数', align: 'right', render: r => r.days === null ? '<span class="muted" title="近 90 天无出库记录">无消耗</span>'
+          : `<span class="money">${r.days.toFixed(1)}</span><div class="cell-sub">近 90 天出 ${num(r.burn90)}</div>` },
+        { k: 'order_by', label: '最晚下单日', render: r => r.order_by
+          ? `<span class="mono" style="${r.order_by < d.today ? 'color:var(--danger);font-weight:600' : ''}">${esc(r.order_by)}</span><div class="cell-sub">提前期 ${num(r.lead)} 天</div>`
+          : `<span class="muted">—</span>` },
+        { k: 'fill', label: '补料金额', align: 'right', render: r => `<span class="money">¥${money(r.fill)}</span><div class="cell-sub">参考价 ¥${money(r.price)}</div>` },
+        { k: 'used_by', label: '清单引用', align: 'right', render: r => r.used_by ? `<span class="tag">${num(r.used_by)} 张</span>` : '<span class="muted">—</span>' },
+        { k: 'run_rel', label: '上次运算', render: r => !d.last ? '<span class="muted">未运算</span>'
+          : r.run_qty ? `<span class="money">${num(r.run_qty)}</span>${r.run_rel ? `<div class="cell-sub mono"><span class="cell-link" data-open="${r.run_rel.indexOf('OS') === 0 ? 'os_order' : 'purchase_req'}=${encodeURIComponent(r.run_rel)}">${esc(r.run_rel)}</span></div>` : '<div class="cell-sub muted">未下达</div>'}`
+          : '<span class="muted small">覆盖,未建议</span>' },
+      ], d.short, { pk: 'code', empty: '当前没有缺料物料:可用量与在途已全部覆盖未履约需求和安全库存' })}
+      </div>
+      <div class="grid g2 mt16">
+        <div class="card"><div class="card-head"><h3>${icon('clock')}长周期与关键件风险</h3>
+          <div class="right"><span class="muted small">提前期降序 · 仅列缺料项</span></div></div>
+          ${UI.table([
+            { k: 'name', label: '物料', render: r => `<span class="cell-link cell-main" data-open="products=${encodeURIComponent(r.code)}">${esc(r.name)}</span>
+              <div class="cell-sub mono">${esc(r.code)}</div>` },
+            { k: 'lead', label: '提前期', align: 'right', render: r => `<span class="money strong">${num(r.lead)} 天</span>` },
+            { k: 'net', label: '净缺口', align: 'right', render: r => `<span class="money" style="color:var(--danger)">${num(r.net)}</span>` },
+            { k: 'key', label: '属性', render: r => {
+              const tags = [];
+              if (r.lead >= 21) tags.push('<span class="badge b-warning">长周期</span>');
+              const kp = d.keyShort.filter(x => x.product === r.code).length;
+              if (kp) tags.push(`<span class="badge b-danger">关键件 ×${kp}</span>`);
+              if (!tags.length) tags.push('<span class="muted small">常规</span>');
+              return tags.join('');
+            } },
+          ], d.longLead.concat(d.short.filter(r => r.lead < 21 && d.keyShort.some(x => x.product === r.code)))
+              .filter((r, i, a) => a.findIndex(x => x.code === r.code) === i).slice(0, 10),
+            { pk: 'code', empty: '缺料项中没有长周期或关键件' })}
+        </div>
+        <div class="card"><div class="card-head"><h3>${icon('layers')}清单覆盖与下展深度</h3>
+          <div class="right"><span class="muted small">自制/委外件 ${num(d.made.length)} 项</span></div></div>
+          ${UI.table([
+            { k: 'name', label: '物料', render: r => `<span class="cell-link cell-main" data-open="products=${encodeURIComponent(r.code)}">${esc(r.name)}</span>
+              <div class="cell-sub mono">${esc(r.code)}</div>` },
+            { k: 'mode', label: '供应方式', render: r => `<span class="badge ${r.mode === 'out' ? 'b-purple' : 'b-success'}">${esc(SCHEMA.MRP_SRC[r.mode])}</span>` },
+            { k: 'bm', label: '生效清单', render: r => r.bm ? `<span class="mono cell-link" data-open="bom=${encodeURIComponent(r.bm.no)}">${esc(r.bm.no)}</span>
+              <div class="cell-sub">${esc(r.bm.name)} · ${num(r.bm.lines_cnt)} 行</div>` : '<span class="badge b-warning">缺清单</span>' },
+            { k: 'gap', label: '计划影响', render: r => r.bm ? '<span class="muted small">子件需求随父件建议下展</span>'
+              : `<span class="small" style="color:var(--danger)">MRP 当作外购件直接生成采购申请,子件用料无法展开</span>` },
+          ], d.made, { pk: 'code', empty: '当前筛选范围内没有自制或委外物料' })}
+        </div>
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('zap')}最近运算与实时口径差异</h3>
+        <div class="right">${d.last ? `<button class="btn sm" data-open="mrp_run=${encodeURIComponent(d.last.no)}">${icon('eye')}查看 ${esc(d.last.no)}</button>` : ''}
+          <button class="btn sm primary" data-new-doc="mrp_run">${icon('zap')}发起新一轮运算</button></div></div>
+      <div class="card-body">${d.last ? `<div class="stat-row">
+          <div>运算单号<b class="mono">${esc(d.last.no)}</b></div><div>运算日期<b>${dateCN(d.last.date)}</b></div>
+          <div>需求口径<b>${esc(SCHEMA.MRP_DEMAND[d.last.source] || d.last.source)}</b></div><div>计划周期<b>${num(d.last.horizon)} 天</b></div>
+          <div>建议行<b>${num(d.last.rows_cnt)}</b></div><div>缺料行<b>${num(d.last.shortage_cnt)}</b></div>
+          <div>运算时净需求<b>${num(runNet)}</b></div><div>当前实时净缺口<b>${num(shortQty)}</b></div></div>
+        <div class="muted small mt8">差异来自运算之后新审核的订单、收货入库与占用变化 —— 计划单是快照,缺料表是现值。${d.last.status === 'computed' ? '本轮建议尚有未下达行,下达后仍是草稿申请单,需采购审批才生效。' : '本轮建议已全部处理或归档。'}</div>`
+        : `<div class="muted small">尚未做过计划运算。可在「计划管理 / MRP 计划运算」按未履约订单、安全库存或人工需求起算,运算只读台账、不改库存与凭证。</div>`}</div>
+      </div>`;
+  }
+
+  function bindShortage(root) {
+    const wh = UI.$('[data-swh]', root);
+    if (wh) wh.addEventListener('change', () => { shortState.wh = wh.value; APP.render(); });
+    const src = UI.$('[data-ssrc]', root);
+    if (src) src.addEventListener('change', () => { shortState.src = src.value; APP.render(); });
+  }
+
+  /* ---------------- 价格策略与毛利 ---------------- */
+  const priceState = { kind: '' };
+  const KIND_COLOR = { customer: '#4F46E5', promo: '#DB2777', channel: '#0EA5E9', category: '#F59E0B', tier: '#10B981', std: '#94A3B8' };
+
+  /** 近半年成交行的价格重放:每行按成交日重走取价阶梯,与价目表报价、成本红线比对 */
+  function priceReplay() {
+    const out = [];
+    DB.list('sales_order').forEach(o => {
+      if (o.status === 'draft' || o.status === 'cancelled') return;
+      DB.lines('so_lines', o.no).forEach(l => {
+        if (!l.product || !l.qty) return;
+        const p = DB.find('products', l.product) || {};
+        const q = ACT.PRICE.pick({ customer: o.customer, product: l.product, qty: l.qty, date: o.date, channel: o.channel, warehouse: o.warehouse });
+        const net = r2((l.price || 0) * (1 - (l.discount || 0)));
+        out.push({ o, l, q, p, net, qty: l.qty, std: r2(p.price || 0), cost: q.cost, floor: q.floor,
+          off: r2(net - (p.price || 0)), offRate: p.price ? net / p.price - 1 : 0, give: r2((net - (p.price || 0)) * l.qty),
+          margin: net > 0 ? (net - q.cost) / net : 0, below: net > 0 && net < q.floor,
+          matched: q.listNo ? Math.abs(net - q.net) < 0.005 : false });
+      });
+    });
+    return out;
+  }
+
+  function pricing() {
+    const today = DB.today();
+    const lists = DB.list('price_list');
+    const active = ACT.PRICE.lists(today);
+    const cnt = st => lists.filter(pl => pl.status === st).length;
+    const rows = priceReplay();
+    const hit = rows.filter(x => x.q.listNo).length;
+    const give = r2(rows.reduce((s, x) => s + x.give, 0));
+    const sold = r2(rows.reduce((s, x) => s + x.std * x.qty, 0));
+    const below = rows.filter(x => x.below);
+    const apList = DB.where('approval', a => a.module === 'price_change' || a.module === 'price_list');
+    /* 草稿订单的红线拦截:价格闸门尚未放行,是报表上唯一可执行的待办 */
+    const blocked = [];
+    DB.where('sales_order', o => o.status === 'draft').forEach(o => {
+      ACT.PRICE.guard(o, DB.lines('so_lines', o.no)).forEach(v => blocked.push({ o, v }));
+    });
+    const bandOf = (r, bands) => bands.find(b => b.test(r)) || bands[bands.length - 1];
+    const offBands = [
+      { name: '原价及以上(溢价)', test: r => r >= 0, color: '#0E7490' },
+      { name: '让利 0-5%', test: r => r < 0 && r >= -0.05, color: '#10B981' },
+      { name: '让利 5-10%', test: r => r < -0.05 && r >= -0.10, color: '#F59E0B' },
+      { name: '让利 10-20%', test: r => r < -0.10 && r >= -0.20, color: '#EF4444' },
+      { name: '让利 20% 以上', test: r => r < -0.20, color: '#DC2626' }];
+    const gmBands = [
+      { name: '亏本成交 <0%', test: r => r < 0, color: '#DC2626' },
+      { name: '0-5% 红线区内', test: r => r >= 0 && r < 0.05, color: '#EF4444' },
+      { name: '5-10%', test: r => r >= 0.05 && r < 0.10, color: '#F59E0B' },
+      { name: '10-20%', test: r => r >= 0.10 && r < 0.20, color: '#10B981' },
+      { name: '20% 以上', test: r => r >= 0.20, color: '#0E7490' }];
+    const tally = (bands, get) => {
+      const m = {};
+      rows.forEach(x => { const b = bandOf(get(x), bands); m[b.name] = m[b.name] || { b, n: 0, amt: 0 }; m[b.name].n++; m[b.name].amt += x.net * x.qty; });
+      return bands.filter(b => m[b.name]).map(b => ({ name: `${b.name}(${m[b.name].n} 行)`, value: r2(m[b.name].amt), color: b.color }));
+    };
+    const srcKinds = {};
+    rows.forEach(x => { const k = x.q.kind; srcKinds[k] = (srcKinds[k] || 0) + 1; });
+    const srcBars = Object.keys(srcKinds).sort((a, b) => srcKinds[b] - srcKinds[a])
+      .map(k => ({ name: (SCHEMA.entities.price_list.fields.kind.opts[k] || k), key: k, value: srcKinds[k], color: KIND_COLOR[k] || '#94A3B8' }));
+
+    /* 客户价格离散度:同一客户实际净价对标准售价的偏离,以及最深让利行 */
+    const byCust = {};
+    rows.forEach(x => {
+      const c = byCust[x.o.customer] || (byCust[x.o.customer] = { code: x.o.customer, name: x.o.customer_name, n: 0, amt: 0, std: 0, give: 0, gm: 0, hit: 0, deep: 1, low: 0 });
+      c.n++; c.amt += x.net * x.qty; c.std += x.std * x.qty; c.give += x.give; c.hit += x.q.listNo ? 1 : 0;
+      c.gm += (x.net - x.cost) * x.qty;
+      if (x.offRate < c.deep) { c.deep = x.offRate; c.low = x.net; }
+    });
+    const custRows = Object.values(byCust).map(c => ({ ...c, offRate: c.std ? c.give / c.std : 0, margin: c.amt ? c.gm / c.amt : 0,
+      own: (lists.find(pl => pl.customer === c.code && pl.status === 'approved') || {}).no || '' }))
+      .sort((a, b) => a.offRate - b.offRate);
+
+    const plRows = lists.slice().sort((a, b) => (a.priority || 50) - (b.priority || 50) || String(a.no).localeCompare(String(b.no)))
+      .filter(pl => !priceState.kind || pl.kind === priceState.kind)
+      .map(pl => ({ pl, im: ACT.PRICE.listImpact(pl), cited: DB.list('so_lines').filter(l => l.list_no === pl.no).length,
+        rank: (ACT.PRICE.WEIGHT[pl.kind] || 9) * 100 + (pl.priority || 50) }));
+
+    return head('pricing', `<button class="btn" data-route="price_list">${icon('wallet')}价目表</button><button class="btn primary" data-action="exportReport">${icon('download')}导出价格明细</button>`) + `
+      <div class="grid g4">
+        ${UI.kpi({ label: '生效价目表', value: num(active.length) + '<small> 张</small>', icon: 'wallet', color: '#4F46E5',
+          foot: `共 ${num(lists.length)} 张 · 草稿 ${cnt('draft')} / 待核准 ${cnt('pending')} / 驳回 ${cnt('rejected')} · 价格行 ${num(lists.reduce((s, pl) => s + DB.lines('pl_lines', pl.no).length, 0))}` })}
+        ${UI.kpi({ label: '价目表覆盖率', value: (rows.length ? (hit / rows.length * 100).toFixed(1) : '0.0') + '<small> %</small>', icon: 'check', color: '#047857',
+          foot: `近半年 ${num(rows.length)} 行成交中 ${num(hit)} 行命中价目表,其余回落标准售价` })}
+        ${UI.kpi({ label: '对标准售价让利', value: '¥' + UI.compact(Math.abs(give)), icon: 'trendDown', color: give < 0 ? '#DC2626' : '#047857',
+          foot: `整体偏离 ${(sold ? give / sold * 100 : 0).toFixed(2)}% · 按未税净额 ¥${UI.compact(rows.reduce((s, x) => s + x.net * x.qty, 0))} 结算` })}
+        ${UI.kpi({ label: '跌破红线成交', value: num(below.length) + '<small> 行</small>', icon: 'shield', color: below.length ? '#DC2626' : '#0E7490',
+          foot: `草稿待裁决 ${num(blocked.length)} 行 · 改价与价格策略审批 ${num(apList.length)} 单` })}
+      </div>
+      <div class="grid g-2-1 mt16">
+        <div class="card"><div class="card-head"><h3>${icon('pie')}让利与毛利结构</h3><div class="right"><span class="muted small">按未税成交额分布</span></div></div>
+          <div class="card-body"><div class="section-title">相对标准售价的折让带</div>
+            ${UI.hbars(tally(offBands, x => x.offRate), { fmt: v => '¥' + money(v) })}
+            <div class="section-title mt16">成交毛利率带</div>
+            ${UI.hbars(tally(gmBands, x => x.margin), { fmt: v => '¥' + money(v) })}
+            <div class="muted small mt8">毛利率按成交时点该仓移动加权成本计算;红线价 = 成本 ×(1 + 价目表红线毛利率),跌破红线的行须经改价审批才允许审核。</div></div></div>
+        <div class="card"><div class="card-head"><h3>${icon('layers')}取价阶梯命中分布</h3><div class="right"><span class="muted small">引擎重放</span></div></div>
+          <div class="card-body">${UI.hbars(srcBars, { fmt: v => num(v) + ' 行', links: 'price_list' })}
+            <div class="divider"></div>
+            <div class="muted small">权重顺序:客户专属 → 促销 → 渠道 → 类目 → 阶梯 → 标准售价;同级冲突按价目表优先级数值小者优先。</div>
+            <div class="section-title mt12">改价与价格策略审批</div>
+            ${apList.length ? apList.slice().sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 8).map(a => `<div class="flex" style="padding:7px 0;border-bottom:1px dashed var(--border)">
+              <span class="mono cell-link" data-open="approval=${encodeURIComponent(a.no)}">${esc(a.no)}</span>
+              <span class="grow small muted">${esc(a.title)}</span><span class="money small">¥${money(a.amount)}</span>${UI.badge(a.status)}</div>`).join('')
+              : '<div class="muted small">暂无改价申请。</div>'}
+          </div></div>
+      </div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('users')}客户价格离散度</h3>
+        <div class="right"><span class="muted small">偏离越负,该客户拿到的价格越深</span></div></div>
+        ${UI.table([
+          { k: 'name', label: '客户', render: c => `<span class="cell-main cell-link" data-open="customers=${encodeURIComponent(c.code)}">${esc(c.name)}</span>
+            <div class="cell-sub mono">${esc(c.code)}${c.own ? ' · 专属表 ' + esc(c.own) : ''}</div>` },
+          { k: 'n', label: '成交行', align: 'right', render: c => num(c.n) },
+          { k: 'amt', label: '未税成交额', align: 'right', render: c => '¥' + money(c.amt) },
+          { k: 'offRate', label: '对标准售价', align: 'right', render: c => `<span style="color:${c.offRate < -0.08 ? 'var(--danger)' : 'var(--text)'}">${(c.offRate * 100).toFixed(2)}%</span>` },
+          { k: 'give', label: '让利额', align: 'right', render: c => '¥' + money(c.give) },
+          { k: 'margin', label: '毛利率', align: 'right', render: c => `<span style="color:${c.margin < ACT.PRICE.FLOOR ? 'var(--danger)' : 'inherit'}">${(c.margin * 100).toFixed(1)}%</span>` },
+          { k: 'hit', label: '价目表命中', align: 'right', render: c => `${num(c.hit)} / ${num(c.n)}` },
+          { k: 'deep', label: '最深单行折让', align: 'right', render: c => `${(c.deep * 100).toFixed(1)}%<div class="cell-sub">净价 ¥${money(c.low)}</div>` },
+        ], custRows.slice(0, 14), { pk: 'code', empty: '暂无成交数据' })}
+        <div class="table-foot"><span>共 ${num(custRows.length)} 家客户有成交</span><span>整体偏离 ${(sold ? give / sold * 100 : 0).toFixed(2)}%</span><span class="money strong">让利 ¥${money(give)}</span></div></div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('grid')}价格策略台账</h3>
+        <div class="right"><span class="muted small">类型</span><select data-pkind><option value="">全部</option>
+          ${Object.keys(SCHEMA.entities.price_list.fields.kind.opts).map(k => `<option value="${k}"${priceState.kind === k ? ' selected' : ''}>${esc(SCHEMA.entities.price_list.fields.kind.opts[k])}</option>`).join('')}</select></div></div>
+        ${UI.table([
+          { k: 'no', label: '价目表', render: x => `<span class="cell-main mono cell-link" data-open="price_list=${encodeURIComponent(x.pl.no)}">${esc(x.pl.no)}</span>
+            <div class="cell-sub">${esc(x.pl.name)}</div>` },
+          { k: 'kind', label: '类型', render: x => `<span class="badge b-neutral">${esc(SCHEMA.entities.price_list.fields.kind.opts[x.pl.kind] || x.pl.kind)}</span>
+            <div class="cell-sub">${x.pl.customer ? esc((DB.find('customers', x.pl.customer) || {}).name || x.pl.customer) : x.pl.channel ? esc(SCHEMA.entities.price_list.fields.channel.opts[x.pl.channel] || '') : x.pl.category ? esc(x.pl.category) : '全渠道'}</div>` },
+          { k: 'rank', label: '取价权重', align: 'right', render: x => num(x.rank) + (active.indexOf(x.pl) >= 0 ? '<div class="cell-sub" style="color:var(--success)">今日参与取价</div>' : '<div class="cell-sub muted">今日不参与</div>') },
+          { k: 'win', label: '有效期', render: x => `${dateCN(x.pl.valid_from)} ~ ${x.pl.valid_to ? dateCN(x.pl.valid_to) : '长期'}<div class="cell-sub muted small">${x.pl.valid_to && today > x.pl.valid_to ? '已失效 ' + UI.days(x.pl.valid_to, today) + ' 天' : x.pl.valid_to ? '剩 ' + UI.days(today, x.pl.valid_to) + ' 天' : ''}</div>` },
+          { k: 'lines', label: '价格行', align: 'right', render: x => num(x.im.lines) },
+          { k: 'floor', label: '红线毛利率', align: 'right', render: x => (((x.pl.margin_floor == null ? ACT.PRICE.FLOOR : x.pl.margin_floor)) * 100).toFixed(1) + '%' },
+          { k: 'give', label: '让利测算', align: 'right', render: x => `<span style="color:${x.im.total < 0 ? 'var(--danger)' : 'inherit'}">¥${money(x.im.total)}</span>
+            <div class="cell-sub muted small">按近半年实际销量</div>` },
+          { k: 'cited', label: '引用行', align: 'right', render: x => num(x.cited) },
+          { k: 'status', label: '状态', render: x => UI.badge(x.pl.status) + (x.pl.ap ? `<div class="cell-sub mono cell-link" data-open="approval=${encodeURIComponent(x.pl.ap)}">${esc(x.pl.ap)}</div>` : '') },
+        ], plRows, { pk: 'no', empty: '没有该类型的价目表' })}</div>
+      <div class="card mt16"><div class="card-head"><h3>${icon('shield')}价格闸门待裁决明细</h3>
+        <div class="right"><span class="muted small">草稿订单跌破毛利红线,审核将被拦截</span></div></div>
+        ${blocked.length ? UI.table([
+          { k: 'no', label: '销售订单', render: x => `<span class="cell-main mono cell-link" data-open="sales_order=${encodeURIComponent(x.o.no)}">${esc(x.o.no)}</span>
+            <div class="cell-sub">${esc(x.o.customer_name || '')}</div>` },
+          { k: 'p', label: '物料', render: x => `${esc(x.v.product_name)}<div class="cell-sub mono">${esc(x.v.product)}</div>` },
+          { k: 'qty', label: '数量', align: 'right', render: x => num(x.v.qty) },
+          { k: 'net', label: '成交净价', align: 'right', render: x => `<span class="money" style="color:var(--danger);font-weight:650">¥${money(x.v.net)}</span>` },
+          { k: 'floor', label: '红线价', align: 'right', render: x => '¥' + money(x.v.floor) },
+          { k: 'gap', label: '缺口', align: 'right', render: x => '¥' + money(x.v.gap) },
+          { k: 'cost', label: '成本', align: 'right', render: x => '¥' + money(x.v.cost) },
+          { k: 'ap', label: '改价审批', render: x => x.o.price_ap ? `<span class="mono cell-link" data-open="approval=${encodeURIComponent(x.o.price_ap)}">${esc(x.o.price_ap)}</span>${UI.badge((DB.find('approval', x.o.price_ap) || {}).status)}` : '<span class="badge b-warning">待发起</span>' },
+        ], blocked, { pk: 'no', empty: '' }) : `<div class="card-body">${UI.emptyBox('没有待裁决的低价行', '所有草稿订单的成交价均在毛利红线之上')}</div>`}</div>`;
+  }
+
+  function bindPricing(root) {
+    const sel = UI.$('[data-pkind]', root);
+    if (sel) sel.addEventListener('change', () => { priceState.kind = sel.value; APP.go('reports/pricing'); });
+  }
+
   function render(key) {
     if (key === 'ar' || key === 'ap') return aging(key);
+    if (key === 'credit') return credit();
     if (key === 'sales') return sales();
     if (key === 'purchase') return purchase();
     if (key === 'inventory') return inventory();
     if (key === 'pl') return pl();
     if (key === 'close') return close();
     if (key === 'dashboard2') return custom();
+    if (key === 'trace') return trace();
+    if (key === 'pricing') return pricing();
+    if (key === 'shortage') return shortage();
     return UI.emptyBox('报表不存在');
   }
-  const bind = { 'reports/dashboard2': bindCustom, 'reports/close': bindClose };
+  const bind = { 'reports/dashboard2': bindCustom, 'reports/close': bindClose, 'reports/trace': bindTrace, 'reports/pricing': bindPricing,
+    'reports/shortage': bindShortage };
 
-  return { render, TITLES, DESC, aging, bind, sales, pl, close };
+  return { render, TITLES, DESC, aging, bind, sales, pl, close, credit, trace, pricing, shortage };
 })();

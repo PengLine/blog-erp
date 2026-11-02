@@ -92,41 +92,48 @@ window.SEED = (function () {
         '系统内置最高权限(级别 ≥9 直接放行),负责角色矩阵维护与系统参数。'],
       ['ROLE-02', '财务经理', '财务部', 8, 'all', 2000000,
         perm(['dashboard', 'invoice', 'receipt', 'bill', 'payment', 'journal', 'period', 'gl_account', 'reports'], ['view', 'edit', 'approve'])
-          .concat(perm(['sales_order', 'purchase_order', 'purchase_req', 'rfq', 'product_release', 'supplier_apply', 'processors', 'processor_audit', 'os_order', 'rma', 'stock', 'products', 'customers', 'suppliers', 'activity', 'role'], ['view'])),
-        '全盘财务口径:开票/收付款/凭证可审可改,业务模块只读监督。'],
+          .concat(perm(['sales_order', 'purchase_order', 'purchase_req', 'rfq', 'product_release', 'supplier_apply', 'processors', 'processor_audit', 'os_order', 'rma', 'stock', 'lot', 'products', 'customers', 'price_list', 'suppliers', 'activity', 'role', 'bom', 'mrp_run'], ['view']))
+          .concat(perm(['bom'], ['approve'])),
+        '全盘财务口径:开票/收付款/凭证可审可改,业务模块只读监督,并复核物料清单的成本影响额。'],
       ['ROLE-03', '销售主管', '销售部', 6, 'dept', 500000,
-        perm(['sales_order', 'customers', 'rma', 'delivery'], ['view', 'edit', 'approve'])
+        perm(['sales_order', 'customers', 'rma', 'delivery', 'price_list'], ['view', 'edit', 'approve'])
           .concat(perm(['product_release'], ['view', 'edit', 'approve']))
-          .concat(perm(['invoice', 'receipt', 'rfq', 'stock', 'products', 'dashboard', 'reports', 'activity'], ['view'])),
-        '订单全流程负责人,有信用超卖与售后工单裁决权。'],
+          .concat(perm(['invoice', 'receipt', 'rfq', 'stock', 'lot', 'products', 'dashboard', 'reports', 'activity'], ['view'])),
+        '订单全流程负责人,有信用超卖、价格策略与售后工单裁决权。'],
       ['ROLE-04', '销售代表', '销售部', 2, 'self', 0,
         perm(['sales_order', 'customers'], ['view', 'edit'])
-          .concat(perm(['invoice', 'receipt', 'delivery', 'stock', 'products', 'dashboard', 'reports', 'rma'], ['view'])),
+          .concat(perm(['invoice', 'receipt', 'delivery', 'stock', 'products', 'price_list', 'dashboard', 'reports', 'rma'], ['view'])),
         '仅能维护本人订单与客户,报价折扣超限需主管审核。'],
       ['ROLE-05', '采购主管', '采购部', 6, 'dept', 800000,
         perm(['purchase_req', 'purchase_order', 'rfq', 'supplier_apply', 'processors', 'processor_audit', 'os_order', 'gr'], ['view', 'edit', 'approve'])
-          .concat(perm(['bill', 'products', 'suppliers', 'stock', 'dashboard', 'reports', 'activity'], ['view'])),
-        '供应商准入、定标与委外加工的最终裁决岗,付款审批归财务。'],
+          .concat(perm(['bom'], ['view', 'approve']).concat(perm(['mrp_run'], ['view', 'edit'])))
+          .concat(perm(['bill', 'products', 'suppliers', 'stock', 'lot', 'dashboard', 'reports', 'activity', 'iqc'], ['view'])),
+        '供应商准入、定标与委外加工的最终裁决岗,并核准物料清单的供应可行性;付款审批归财务。'],
       ['ROLE-06', '采购员', '采购部', 3, 'self', 50000,
         perm(['rfq', 'purchase_req', 'purchase_order', 'supplier_apply', 'gr'], ['view', 'edit'])
-          .concat(perm(['products', 'suppliers', 'processors', 'os_order', 'stock', 'dashboard'], ['view'])),
-        '负责询价、比价与订单执行跟进,超限额需上级审批。'],
+          .concat(perm(['bom', 'mrp_run'], ['view', 'edit']))
+          .concat(perm(['products', 'suppliers', 'processors', 'os_order', 'stock', 'lot', 'dashboard', 'iqc'], ['view'])),
+        '负责询价、比价与订单执行跟进,按计划运算结果下达采购申请;超限额需上级审批。'],
       ['ROLE-07', '仓库管理员', '仓储物流部', 3, 'dept', 0,
-        perm(['stock', 'transfer', 'stocktake', 'stock_movements', 'gr', 'delivery', 'warehouses', 'os_order'], ['view', 'edit'])
-          .concat(perm(['sales_order', 'purchase_order', 'products', 'dashboard'], ['view'])),
-        '收发货、调拨与盘点执行岗,不触碰金额与成本。'],
+        perm(['stock', 'lot', 'transfer', 'stocktake', 'stock_movements', 'gr', 'delivery', 'warehouses', 'os_order'], ['view', 'edit'])
+          .concat(perm(['bom', 'mrp_run'], ['view', 'edit']))
+          .concat(perm(['sales_order', 'purchase_order', 'products', 'dashboard', 'iqc'], ['view'])),
+        '收发货、调拨与盘点执行岗,并按组套装配清单领料;不触碰金额与成本。'],
       ['ROLE-08', '财务会计', '财务部', 4, 'dept', 100000,
         perm(['invoice', 'receipt', 'bill', 'payment', 'journal'], ['view', 'edit'])
-          .concat(perm(['gl_account', 'reports', 'dashboard', 'sales_order', 'purchase_order', 'customers', 'suppliers'], ['view'])),
+          .concat(perm(['gl_account', 'reports', 'dashboard', 'sales_order', 'purchase_order', 'customers', 'price_list', 'suppliers'], ['view'])),
         '日常开票、核销与凭证录入,月末结账权限归财务经理。'],
       ['ROLE-09', '产品经理', '产品部', 5, 'dept', 300000,
-        perm(['product_release', 'rfq', 'products'], ['view', 'edit'])
-          .concat(perm(['supplier_apply', 'stock', 'sales_order', 'customers', 'dashboard', 'reports'], ['view'])),
-        '新品立项与定价提案,发布审批由销售主管裁决。'],
+        perm(['product_release', 'rfq', 'products', 'bom'], ['view', 'edit'])
+          .concat(perm(['price_list'], ['view', 'edit']))
+          .concat(perm(['supplier_apply', 'stock', 'sales_order', 'customers', 'dashboard', 'reports', 'mrp_run'], ['view'])),
+        '新品立项与定价提案,并编制物料清单;发布与清单核准分别由销售主管、采购主管裁决。'],
       ['ROLE-10', '品质经理', '品质部', 5, 'dept', 0,
-        perm(['processor_audit', 'processors', 'rma', 'supplier_apply', 'os_order'], ['view', 'edit'])
-          .concat(perm(['products', 'stock', 'dashboard', 'reports'], ['view'])),
-        '外协商打样评分与售后质量责任判定的录入岗,准入结论由采购主管裁决。'],
+        perm(['iqc'], ['view', 'edit', 'approve'])
+          .concat(perm(['processor_audit', 'processors', 'rma', 'supplier_apply', 'os_order'], ['view', 'edit']))
+          .concat(perm(['lot'], ['view', 'edit', 'approve']))
+          .concat(perm(['products', 'stock', 'gr', 'purchase_order', 'suppliers', 'dashboard', 'reports'], ['view'])),
+        '来料检验判定与让步/拒收裁决岗;外协商打样评分与售后质量责任判定由其录入。'],
     ];
     ROLES.forEach(r => push('role', {
       code: r[0], name: r[1], dept: r[2], level: r[3], scope: r[4], max_amount: r[5],
@@ -146,13 +153,17 @@ window.SEED = (function () {
 
     /* ---------- 仓库 ---------- */
     const WHS = [
-      ['WH-HZ01', '杭州中心仓', '浙江省杭州市萧山区宁围街道传化物流基地 12 号库', '何砚舟', 'enabled', 8600],
-      ['WH-GZ02', '广州南沙仓', '广东省广州市南沙区港前大道南 4 号保税物流园 B 区', '罗小满', 'enabled', 5200],
-      ['WH-TJ03', '天津华北仓', '天津市东丽区空港经济区中心大道 55 号', '罗小满', 'enabled', 3800],
-      ['WH-CD04', '成都西南仓', '四川省成都市青白江区智慧产业城 D6 库', '何砚舟', 'enabled', 2400],
-      ['WH-RF05', 'returns 退货残次仓', '浙江省杭州市余杭区良渚街道 Logistics 园 3 号库', '罗小满', 'enabled', 900],
+      ['WH-HZ01', '杭州中心仓', '浙江省杭州市萧山区宁围街道传化物流基地 12 号库', '何砚舟', 'enabled', 8600, 'stock'],
+      ['WH-GZ02', '广州南沙仓', '广东省广州市南沙区港前大道南 4 号保税物流园 B 区', '罗小满', 'enabled', 5200, 'stock'],
+      ['WH-TJ03', '天津华北仓', '天津市东丽区空港经济区中心大道 55 号', '罗小满', 'enabled', 3800, 'stock'],
+      ['WH-CD04', '成都西南仓', '四川省成都市青白江区智慧产业城 D6 库', '何砚舟', 'enabled', 2400, 'stock'],
+      ['WH-RF05', 'returns 退货残次仓', '浙江省杭州市余杭区良渚街道 Logistics 园 3 号库', '罗小满', 'enabled', 900, 'defect'],
     ];
-    WHS.forEach(w => push('warehouses', { code: w[0], name: w[1], location: w[2], manager: w[3], phone: '0571-8' + R.int(1000000, 9999999), area: w[5], status: w[4], note: '' }));
+    WHS.forEach(w => push('warehouses', { code: w[0], name: w[1], location: w[2], manager: w[3], phone: '0571-8' + R.int(1000000, 9999999), area: w[5], status: w[4], kind: w[6], note: '' }));
+    /* 待检仓固定建在中心仓旁,不占用随机序列:收货判定前的隔离区,禁止销售与领用 */
+    push('warehouses', { code: SCHEMA.QC_WH, name: '杭州待检仓(质检隔离)', location: '浙江省杭州市萧山区宁围街道传化物流基地 12 号库 A 区隔离棚',
+      manager: '邵聿宁', phone: '0571-86120450', area: 320, status: 'enabled', kind: 'qc',
+      note: '来料先入此仓隔离,品质经理判定合格/让步后方可转入正式仓;拒收批次直接出库退货。' });
     const MAIN_WH = 'WH-HZ01';
 
     /* ---------- 商品 ---------- */
@@ -175,7 +186,9 @@ window.SEED = (function () {
             uom: R.chance(.15) ? 'SET' : 'PCS', barcode: '69' + R.int(10000000000, 99999999999),
             cost, price: money(cost * margin), tax_rate: CAT[ck].tax, weight: R.int(120, 4800),
             safety_qty: Math.max(12, baseQty * R.int(2, 6)), lead_time: R.int(7, 35),
-            status: isDisabled ? 'disabled' : 'enabled', color: R.pick(COLORS), note: '', _baseQty: baseQty, _cat: ck
+            shelf_life: ck === 'PP' ? 180 : 0,
+            status: isDisabled ? 'disabled' : 'enabled', color: R.pick(COLORS),
+            note: ck === 'PP' ? '无添加短保管线:保质期 180 天,出库强制 FEFO 先到期先出。' : '', _baseQty: baseQty, _cat: ck
           });
         }
       });
@@ -198,6 +211,7 @@ window.SEED = (function () {
         email: 'biz' + String(1000 + i).slice(1) + '@' + R.pick(['163.com', 'qq.com', 'sina.com', 'outlook.com']),
         address: city + '市' + R.pick(['高新区', '经开区', '保税区', '城西', '城南']) + R.pick(['科技大道', '产业园路', '商贸街', '滨江路']) + R.int(1, 999) + '号',
         tax_id: '913301' + R.int(10000000000, 99999999999) + 'X', credit_limit: credit, payment_terms: terms,
+        credit_hold: 'normal',
         salesperson: R.pick(SALES_PEOPLE), status: R.chance(.06) ? 'disabled' : 'enabled', note: ''
       });
     }
@@ -218,6 +232,8 @@ window.SEED = (function () {
         rating: R.int(62, 98), status: R.chance(.08) ? 'disabled' : 'enabled', note: '', _cat: ck
       });
     }
+    /* 质检策略随绩效走:评分高免检,中等抽样,低批批全检(读已有 rating,不占随机序列) */
+    T.suppliers.forEach(s => { s.qc_policy = s.rating >= 90 ? 'skip' : s.rating >= 74 ? 'normal' : 'strict'; });
     const SUPPLIERS = T.suppliers.filter(s => s.status === 'enabled');
     const supByCat = {};
     SUPPLIERS.forEach(s => { (supByCat[s._cat] = supByCat[s._cat] || []).push(s); });
@@ -574,7 +590,7 @@ window.SEED = (function () {
      * ============================================================ */
     const pad2 = n => api.pad(n, 2);
     const CATKEY = { '家居用品': 'HM', '数码配件': 'DP', '个护美妆': 'PP', '户外配件': 'AC', '办公用品': 'OF', '通用五金': 'GD' };
-    const prodOf = code => T.products.find(p => p.code === code) || {};
+    const prodOf = code => T.products.find(p => p.code === code) || { code, name: code };
     const supOf = code => T.suppliers.find(s => s.code === code) || {};
     const supsOf = cat => T.suppliers.filter(s => s.status === 'enabled' && s.category === cat).sort((a, b) => (b.rating || 0) - (a.rating || 0));
     const notFuture = d => d > today ? today : d;
@@ -1217,24 +1233,173 @@ window.SEED = (function () {
         { acc: '6601', debit: money(15000 + i * 1100), memo: '市场推广费' }, { acc: '1002', credit: money(15000 + i * 1100) }], '方静姝');
     });
 
-    /* ---------- 计算库存现量 + 移动加权平均回写 ---------- */
+    /* ---------- 来料检验 IQC:待检仓隔离、三分支裁决与供应商质量回写 ---------- */
+    /* 不占用随机序列:抽样档位、判定人与时间戳全部固定,只消费已生成的收货数据 */
+    const QC = SCHEMA.QC_WH;
+    const supById = {}; T.suppliers.forEach(s => supById[s.code] = s);
+    const aqlOf = q => {
+      const band = SCHEMA.AQL_PLAN.filter(b => q <= b[0])[0] || SCHEMA.AQL_PLAN[SCHEMA.AQL_PLAN.length - 1];
+      return { sample: Math.min(q, band[1]) || 1, acc: band[2] };
+    };
+    /* 收货流水改挂待检仓,库存子账在下方统一重算;改挂前校验原仓余量,避免倒挂出虚假期初 */
+    const onHand = {};
+    T.stock_movements.forEach(m => { const k = m.product + '|' + m.warehouse; onHand[k] = (onHand[k] || 0) + m.qty; });
+    function isolate(g) {
+      const mv = T.stock_movements.filter(m => m.ref === g.no && m.qty > 0);
+      if (!mv.length) return false;
+      for (let i = 0; i < mv.length; i++) if ((onHand[mv[i].product + '|' + mv[i].warehouse] || 0) - mv[i].qty < 0) return false;
+      mv.forEach(m => {
+        onHand[m.product + '|' + m.warehouse] -= m.qty;
+        onHand[m.product + '|' + QC] = (onHand[m.product + '|' + QC] || 0) + m.qty;
+        m.to_warehouse = m.warehouse; m.warehouse = QC; m.note = '采购到货,入待检仓隔离';
+      });
+      g.warehouse = QC;
+      return true;
+    }
+    function reportIQC(g) {
+      const gl = T.gr_lines.filter(l => l.doc === g.no);
+      if (!gl.length) return null;
+      const no = docNo('IQC', 'iqc', g.date);
+      const po = T.purchase_order.find(p => p.no === g.po) || {};
+      const exempt = supById[g.supplier] && supById[g.supplier].qc_policy === 'skip';
+      let qtyIn = 0, sample = 0, acc = 0, amount = 0;
+      gl.forEach((l, i) => {
+        const sp = aqlOf(l.qty);
+        qtyIn += l.qty; sample += sp.sample; acc += sp.acc; amount = money(amount + l.amount);
+        push('iqc_lines', { doc: no, lineno: i + 1, product: l.product, product_name: l.product_name, qty: l.qty,
+          price: l.price, amount: l.amount, sample: sp.sample, acc: sp.acc, defect: 0, defect_code: '', verdict: '待检验' });
+      });
+      const a = push('iqc', { no, date: g.date, gr: g.no, po: g.po, supplier: g.supplier, supplier_name: g.supplier_name,
+        warehouse: QC, target_wh: po.warehouse || MAIN_WH, qty_in: qtyIn, sample_qty: sample, defect_qty: 0, acc_qty: acc,
+        amount, status: 'to_check', discount: 0, claim: 0, penalty: 0, inspector: '', judged_at: '',
+        standard: 'GB/T 2828.1 一般检验水平 II · AQL=1.0', opinion: '',
+        note: exempt ? '免检供应商季度例外抽送检,批次临时隔离在待检仓。' : '收货自动生成报检单,批次在待检仓隔离,判定前不可销售与领用。' });
+      g.iqc = no;
+      return a;
+    }
+    const VERDICT = { pass: '抽检合格,批次由待检仓转入正式仓,可销售与领用。',
+      concession: '缺陷限于外观且不影响使用功能,让步接收并按折价率冲减暂估。',
+      reject: '不合格数超 AQL 允收数,整批拒收退货并冲销到货暂估。' };
+    /** 出具结论:三分支联动库存流水、暂估、供应商评分与采购订单行 */
+    function judgeIQC(a, g, result, o) {
+      const date = addDays(a.date, o.lag || 1);
+      const rows = T.iqc_lines.filter(l => l.doc === a.no);
+      const target = a.target_wh;
+      rows.forEach(l => {
+        const d = Math.max(0, Math.round(o.defectOf(l)));
+        l.defect = d;
+        l.defect_code = d ? (o.code || '外观/包装缺陷') : '';
+        l.verdict = (result === 'pass' ? '合格放行' : result === 'concession' ? '让步接收' : '拒收退货') + (d > l.acc ? '(超允收)' : '');
+      });
+      a.defect_qty = rows.reduce((s, l) => s + l.defect, 0);
+      if (result !== 'reject') {
+        rows.forEach(l => {
+          movement(date, 'iqc_pass', prodOf(l.product), QC, -l.qty, l.price, a.no, '邵聿宁', target, result === 'pass' ? '质检合格转正品' : '让步接收转正品');
+          movement(date, 'iqc_pass', prodOf(l.product), target, l.qty, l.price, a.no, '邵聿宁', QC, result === 'pass' ? '质检合格转正品' : '让步接收转正品');
+        });
+      }
+      if (result === 'concession') {
+        const cut = money(a.amount * o.discount / 100);
+        let booked = 0;
+        rows.forEach((l, i) => {
+          const d = i === rows.length - 1 ? money(cut - booked) : money(l.amount * o.discount / 100);
+          booked = money(booked + d);
+          if (Math.abs(d) > .004) valueMovement(date, 'bill_diff', prodOf(l.product), target, -d, a.no, '钱雅诃', `让步接收折价 ${o.discount}%`);
+        });
+        journal(date, 'gr_accrual', a.no, `来料让步折价冲减暂估—${a.supplier_name}`, [
+          { acc: '2203', debit: cut, memo: '折价冲减暂估' }, { acc: '1405', credit: cut, memo: '存货成本下调' }], '方静姝');
+        g.amount = money((g.amount || 0) - cut);
+        a.discount = o.discount; a.claim = cut; a.penalty = 3;
+        a.note = `缺陷让步,按 ${o.discount}% 折价 ¥${cut.toFixed(2)} 冲减暂估,供应商扣 3 分。`;
+      }
+      if (result === 'reject') {
+        const back = money(a.amount);
+        rows.forEach(l => movement(date, 'iqc_reject', prodOf(l.product), QC, -l.qty, l.price, a.no, '邵聿宁', '', '质检拒收,实物退回供应商'));
+        journal(date, 'gr_accrual', a.no, `来料拒收冲销暂估—${a.supplier_name}`, [
+          { acc: '2203', debit: back, memo: '拒收冲销暂估' }, { acc: '1405', credit: back, memo: '存货转出' }], '方静姝');
+        g.amount = money((g.amount || 0) - back);
+        g.status = 'returned';
+        g.note = `批次经 ${a.no} 整批拒收,实物已退回供应商,暂估冲销完毕,无需开票。`;
+        a.claim = back; a.penalty = 8;
+        a.note = '整批拒收:实物退供应商,暂估已冲销,采购订单行释放待补货。';
+        const poLines = T.po_lines.filter(pl => pl.doc === g.po);
+        poLines.forEach(pl => rows.forEach(l => { if (pl.product === l.product) pl.received = Math.max(0, (pl.received || 0) - l.qty); }));
+        const po = T.purchase_order.find(p => p.no === g.po);
+        if (po && po.status === 'done') {
+          po.status = poLines.some(l => (l.received || 0) > 0) ? 'partial' : 'confirmed';
+          po.note = (po.note ? po.note + ' / ' : '') + `${a.no} 拒收 ${rows.length} 行,订单行已释放待补货`;
+        }
+      }
+      if (result === 'pass') { a.penalty = a.defect_qty ? 1 : 0; a.note = '抽检合格,批次转入正式仓,库存可用量同步释放。'; }
+      a.status = result;
+      a.target_wh = result === 'reject' ? '' : target;
+      a.inspector = '邵聿宁';
+      a.judged_at = date + ' 15:40:00';
+      a.opinion = VERDICT[result];
+      const sup = supById[a.supplier];
+      if (sup && a.penalty) {
+        sup.rating = Math.max(40, (sup.rating || 80) - a.penalty);
+        sup.note = (sup.note ? sup.note + ' / ' : '') + `${a.no} ${a.status === 'pass' ? '合格' : a.status === 'concession' ? '让步接收' : '拒收'},质量扣分 ${a.penalty}`;
+      }
+      return a;
+    }
+    /* 取样:优先常规抽检批次,例外报检用免检供应商在途批次补齐 —— 拒收/让步各出一例,其余合格放行 */
+    const postedGr = T.gr.filter(g => g.status === 'posted' && supById[g.supplier])
+      .sort((x, y) => x.date < y.date ? 1 : x.date > y.date ? -1 : (x.no < y.no ? 1 : -1));
+    const normalCands = postedGr.filter(g => supById[g.supplier].qc_policy !== 'skip');
+    const allCands = normalCands.concat(postedGr.filter(g => supById[g.supplier].qc_policy === 'skip'));
+    /** 取第一个未被报检、且原仓余量足够隔离的收货批次 */
+    function pickGr(list) {
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].iqc) continue;
+        if (isolate(list[i])) return list[i];
+      }
+      return null;
+    }
+    const PLAN_QC = [
+      { src: normalCands, k: 'to_check' },
+      { src: normalCands, k: 'to_check' },
+      { src: normalCands, k: 'concession', discount: 5, lag: 2, code: '外箱破损 / 丝印偏移', defectOf: l => l.acc + 1 },
+      { src: allCands, k: 'reject', code: '尺寸超差 / 功能失效', defectOf: l => Math.max(l.acc + 1, Math.round(l.sample * .12)) },
+      { src: allCands, k: 'pass', defectOf: l => Math.min(l.acc, 1) },
+      { src: allCands, k: 'pass', defectOf: l => Math.min(l.acc, 1) },
+    ];
+    PLAN_QC.forEach(plan => {
+      const g = pickGr(plan.src);
+      if (!g) return;
+      const a = reportIQC(g);
+      if (!a) return;
+      if (plan.k !== 'to_check') judgeIQC(a, g, plan.k, plan);
+    });
+
+    /* ---------- 计算库存现量 + 移动加权平均回写 ----------
+     * 期初铺货要覆盖「时间轴上的最低持仓」而不只是期末余量:
+     * 批次回放按日序推进,若期中出现负库存,扣减就无源可依。 */
+    function mvOrder(a, b) {
+      if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+      return (a.ref === '期初建账' ? 0 : 1) - (b.ref === '期初建账' ? 0 : 1);
+    }
+    T.stock_movements.sort(mvOrder);
     const stockMap = {};
     let topup = 0;
     T.stock_movements.forEach(m => {
       const k = m.product + '|' + m.warehouse;
-      if (!stockMap[k]) stockMap[k] = { product: m.product, warehouse: m.warehouse, qty: 0, amount: 0 };
-      stockMap[k].qty += m.qty; stockMap[k].amount += m.amount;
+      if (!stockMap[k]) stockMap[k] = { product: m.product, warehouse: m.warehouse, qty: 0, amount: 0, low: 0 };
+      const s = stockMap[k];
+      s.qty += m.qty; s.amount += m.amount;
+      if (s.qty < s.low) s.low = s.qty;
     });
     Object.values(stockMap).forEach(s => {
-      if (s.qty >= 0) return;
       const p = T.products.find(x => x.code === s.product) || {};
-      const q = Math.ceil(-s.qty + Math.max(12, Math.round((p.safety_qty || 40) * 0.5)));
+      const keep = s.qty < 0 ? Math.max(12, Math.round((p.safety_qty || 40) * 0.5)) : 0;
+      const q = Math.ceil(Math.max(keep - s.qty, -s.low));
+      if (!(q > 0)) return;
       s.qty += q; s.amount = money(s.amount + q * (p.cost || 0));
       push('stock_movements', { no: 'MV-TOPUP-' + api.pad(topup++, 3) + '-' + s.product, date: OPEN_DATE, type: 'manual',
         product: s.product, product_name: p.name || s.product, warehouse: s.warehouse, to_warehouse: '', qty: q,
         unit_cost: p.cost || 0, amount: money(q * (p.cost || 0)), ref: '期初建账', user: '何砚舟', note: '期初库存补足(分仓铺货结转差异)' });
     });
-    T.stock_movements.sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+    T.stock_movements.sort(mvOrder);
     Object.values(stockMap).forEach(s => {
       const p = T.products.find(x => x.code === s.product) || {};
       const reserved = 0;
@@ -1250,6 +1415,629 @@ window.SEED = (function () {
       s.status = s.qty <= 0 ? 'shortage' : (s.available < (T.products.find(p => p.code === s.product) || {}).safety_qty ? 'low' : s.status);
     });
 
+    /* ---------- 库位主档 + 批次台账回放 ----------
+     * 只按已生成的出入库流水回放数量与流向,不改金额、不占随机序列:
+     * 总账/库存子账口径保持移动加权平均不变,批次是可独立核对的数量维度。 */
+    const ZONE_TXT = SCHEMA.ZONES, ZONE_LETTER = { rcv: 'C', stg: 'A', pick: 'B', qcd: 'D', def: 'E' };
+    const byWh = {};
+    T.warehouses.forEach(w => { byWh[w.code] = w; });
+    const prodByCode = {};
+    T.products.forEach(p => { prodByCode[p.code] = p; });
+    const grByNo = {};
+    T.gr.forEach(g => { grByNo[g.no] = g; });
+    /* 库位规模按各仓 SKU 数与在库量推导,利用率落在 55% 左右的正常区间 */
+    const whLoad = {};
+    T.stock.forEach(s => {
+      const a = whLoad[s.warehouse] || (whLoad[s.warehouse] = { skus: {}, qty: 0 });
+      a.skus[s.product] = 1; a.qty += Math.max(0, s.qty);
+    });
+    Object.keys(whLoad).forEach(wh => {
+      const a = whLoad[wh], w = byWh[wh] || {}, n = Object.keys(a.skus).length;
+      const plan = w.kind === 'qc' ? [['qcd', 4]] : w.kind === 'defect' ? [['def', 4]]
+        : [['rcv', 2], ['stg', Math.max(6, Math.ceil(n * 0.7))], ['pick', Math.max(2, Math.ceil(n * 0.22))]];
+      const short = SCHEMA.WH_SHORT[wh] || wh.slice(3, 5);
+      const total = plan.reduce((s, z) => s + z[1], 0);
+      plan.forEach(z => {
+        for (let i = 1; i <= z[1]; i++) {
+          const cap = z[0] === 'stg' ? Math.max(300, Math.ceil(a.qty / Math.max(1, z[1]) / 0.55 / 10) * 10)
+            : z[0] === 'pick' ? 400 : z[0] === 'qcd' ? 600 : z[0] === 'def' ? 300 : 500;
+          push('bins', { code: `${short}-${ZONE_LETTER[z[0]]}${String(Math.ceil(i / 2)).padStart(2, '0')}-${String((i - 1) % 2 + 1).padStart(2, '0')}`,
+            warehouse: wh, zone: z[0], capacity: cap, manager: w.manager || '', status: 'enabled',
+            note: `${w.name || wh} · ${ZONE_TXT[z[0]]},共 ${total} 个库位` });
+        }
+      });
+    });
+    /* 供应商批号取送货单号规则:DN + 到货年月 + 单内序号,与运行时补录同口径 */
+    T.gr.forEach((g, i) => { if (!g.sup_lot) g.sup_lot = 'DN' + g.date.replace(/-/g, '').slice(2, 8) + '-' + api.pad(i + 1, 3); });
+    let LOT_DATE = OPEN_DATE;
+    const lotCtx = {
+      lots: () => T.lot, bins: () => T.bins, product: c => prodByCode[c], warehouses: w => byWh[w],
+      newLot: r => { T.lot.push(r); return r; }, updLot: r => r,
+      addTx: (no, row) => { row.lineno = T.lot_tx.filter(x => x.doc === no).length + 1; T.lot_tx.push(row); },
+      nextNo: () => docNo('LOT', 'lot', LOT_DATE), stampMv: () => { },
+      today: () => today, addDays: (d, n) => addDays(d, n), user: () => '何砚舟'
+    };
+    const LOTR = LOT.engine(lotCtx);
+    const metaOf = m => {
+      const out = { source: m.type };
+      if (m.ref === '期初建账') out.source = 'init';
+      if (m.type === 'po_receipt') {
+        const g = grByNo[m.ref];
+        if (g) { out.supplier = g.supplier; out.supplier_name = g.supplier_name; out.sup_lot = g.sup_lot; out.iqc = g.iqc; }
+      } else if (m.type === 'os_receive') {
+        const o = T.os_order.find(x => x.no === m.ref);
+        if (o) { out.supplier_name = o.processor_name; out.note = '委外加工收回,批次责任外协厂 ' + o.processor_name; }
+      } else if (m.type === 'so_return') {
+        const r = T.rma.find(x => x.no === m.ref);
+        out.note = r ? `客户退货回库(${r.customer_name}),品质复检前不得再次发货` : '退货回库批次';
+      } else if (m.type === 'manual') { out.supplier_name = out.source === 'init' ? '期初结转(上年留存)' : ''; out.sup_lot = out.source === 'init' ? 'INIT-' + m.product : ''; }
+      else if (m.type === 'stocktake_plus') out.note = '盘盈入账,无源单据批次';
+      return out;
+    };
+    T.stock_movements.forEach(m => {
+      if (!m.qty) return;
+      LOT_DATE = m.date;
+      LOTR.apply(m, metaOf(m));
+    });
+    LOTR.ageScan();
+    /* 效期与质量扣留回写可用量:过期/冻结批次仍账面在库,但不可销售领用 */
+    T.stock.forEach(s => {
+      const h = LOTR.holdQty(s.product, s.warehouse);
+      if (!h) return;
+      s.reserved = Math.min(s.reserved, Math.max(0, s.qty - h));
+      s.available = Math.max(0, s.qty - s.reserved - h);
+      s.status = s.qty <= 0 ? 'shortage' : (s.available < (prodByCode[s.product] || {}).safety_qty ? 'low' : s.status);
+    });
+    T.lot.forEach(l => { l.value = money(l.qty * l.unit_cost); });
+    /* 库位标准容量按回放后的实际承载核定,保留约 25% 拣货波动余量 */
+    T.bins.forEach(b => {
+      const load = T.lot.reduce((s, l) => s + (l.bin === b.code && l.qty > 0 ? l.qty : 0), 0);
+      if (load > b.capacity * 0.75) b.capacity = Math.max(100, Math.ceil(load / 0.75 / 10) * 10);
+    });
+
+    /* ---------- 信用风控:额度占用、预警/冻结与超额特批动线 ---------- */
+    const DAY_MS = 864e5;
+    const yuan = v => String(Math.round(v)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    const k10 = v => Math.max(1e4, Math.round(v / 1e4) * 1e4);
+    /** 与 actions.creditState 同口径:应收余额 + 已审核未开票在途 */
+    function creditUsage(code) {
+      const invs = T.invoice.filter(i => i.customer === code && i.status !== 'cancelled');
+      const odAmt = i => ((i.balance || 0) > .004 && i.due_date && i.due_date < today) ? Math.max(0, i.balance || 0) : 0;
+      const ar = money(invs.reduce((s, i) => s + Math.max(0, i.balance || 0), 0));
+      const overdue = money(invs.reduce((s, i) => s + odAmt(i), 0));
+      const odDays = invs.reduce((s, i) => odAmt(i) ? Math.max(s, Math.round((Date.parse(today) - Date.parse(i.due_date)) / DAY_MS)) : s, 0);
+      let open = 0;
+      T.sales_order.filter(o => o.customer === code && (o.status === 'confirmed' || o.status === 'partial')).forEach(o => {
+        const billed = invs.filter(i => i.so === o.no).reduce((s, i) => s + (i.total || 0), 0);
+        open += Math.max(0, (o.total || 0) - billed);
+      });
+      return { ar, open: money(open), used: money(ar + open), overdue, odDays };
+    }
+    const CUS = {};
+    T.customers.forEach(c => { c.credit_hold = 'normal'; CUS[c.code] = creditUsage(c.code); });
+    const custOf = code => T.customers.find(c => c.code === code) || {};
+    const k5 = v => Math.max(5e3, Math.round(v / 5e3) * 5e3);
+    /* 年中额度复审:按客户类型的授信倍数 × 实际占用重算,让额度与账簿同量级 */
+    const TIER_MULT = { 'KA 重点客户': 3.2, '外贸客户': 2.6, '电商平台': 2.4, '区域经销商': 2, '连锁门店': 1.75, '直销散户': 1.3 };
+    T.customers.forEach((c, idx) => {
+      const st = CUS[c.code];
+      if (c.status !== 'enabled' || !(st.used > 0)) return;
+      c.credit_limit = Math.max(2e4, k10(st.used * (TIER_MULT[c.type] || 2) * (.85 + (idx * 37 % 41) / 100)));
+    });
+    /* 授信在 (占用, 占用+本单) 区间 → 本单审核必然击穿额度 */
+    const breachLimit = (used, total) => Math.min(Math.max(k5(used + total * .62), money(used + 5e3)), money(used + total - 5e3));
+    const pickedCredit = {};
+    let frozenCust = '';
+    /** 取一张尚未处理的草稿订单;指定客户时只在该客户名下取 */
+    const takeDraft = (minTotal, onlyCust) => {
+      const so = T.sales_order.filter(o => o.status === 'draft' && CUS[o.customer] && !o._seenCredit && o.total >= minTotal
+        && !pickedCredit[o.customer] && (onlyCust ? o.customer === onlyCust : o.customer !== frozenCust) && +custOf(o.customer).credit_limit > 0)
+        .sort((a, b) => b.total - a.total)[0];
+      if (so) { so._seenCredit = true; pickedCredit[so.customer] = 1; }
+      return so;
+    };
+    /** 把该客户授信压到本单必然超额的区间 */
+    const breach = so => {
+      const c = custOf(so.customer), st = CUS[so.customer];
+      c.credit_limit = breachLimit(st.used, so.total);
+      return { c, st, after: money(st.used + so.total) };
+    };
+
+    /* 财务停售:逾期最重且手上仍有草稿订单的客户 —— 现场点审核会被直接拦下 */
+    const byOd = T.customers.filter(c => c.status === 'enabled' && CUS[c.code].overdue > 0)
+      .sort((a, b) => CUS[b.code].overdue - CUS[a.code].overdue);
+    frozenCust = (byOd.find(c => T.sales_order.some(o => o.status === 'draft' && o.customer === c.code)) || {}).code || '';
+    if (frozenCust) {
+      const c = custOf(frozenCust), st = CUS[frozenCust];
+      c.credit_hold = 'hold';
+      c.note = `财务停售:逾期 ¥${yuan(st.overdue)} 已 ${st.odDays} 天,回款前冻结发货与订单审核。`;
+    }
+    /* 其余逾期大户收紧授信,进入预警水位 */
+    byOd.filter(c => c.code !== frozenCust && CUS[c.code].overdue > 20000).slice(0, 4).forEach((c, i) => {
+      const st = CUS[c.code];
+      c.credit_limit = Math.max(1e4, k10(st.used / (.83 + i * .03)));
+      c.note = `授信复审:逾期 ¥${yuan(st.overdue)} 未清,额度下调至预警水位,新增订单需财务复核。`;
+    });
+
+    /* 信用特批四态各备一例:驳回(逾期停售户) / 待财务裁决 / 留给现场触发 / 历史放行 */
+    const rejSo = takeDraft(8000, frozenCust);
+    if (rejSo) {
+      const v = breach(rejSo);
+      const ap = apStart('credit', rejSo.no, {
+        date: addDays(today, -5), title: `信用特批 ${rejSo.customer_name} · ${rejSo.no}`, applicant: rejSo.salesperson || '周寒峰',
+        role: '财务经理', amount: rejSo.total, priority: 'std',
+        note: `额度 ¥${yuan(v.c.credit_limit)} · 已占用 ¥${yuan(v.st.used)} · 本单 ¥${yuan(rejSo.total)} · 超额 ¥${yuan(v.after - v.c.credit_limit)}`
+      });
+      ap.status = 'rejected'; ap.approver = '方静姝';
+      ap.opinion = `逾期货款 ¥${yuan(v.st.overdue)} 已 ${v.st.odDays} 天未清,不追加授信;订单退回,先回款再报价。`;
+      ap.time_done = addDays(today, -4) + ' 11:24:06';
+      rejSo.credit_ap = '';
+      rejSo.note = (rejSo.note ? rejSo.note + ' / ' : '') + `信用特批 ${ap.no} 被驳回,客户已被财务停售`;
+    }
+    const pendSo = takeDraft(10000);
+    if (pendSo) {
+      const v = breach(pendSo);
+      const ap = apStart('credit', pendSo.no, {
+        date: today, title: `信用特批 ${pendSo.customer_name} · ${pendSo.no}`, applicant: pendSo.salesperson || '周寒峰',
+        role: '财务经理', amount: pendSo.total, priority: 'urgent',
+        note: `额度 ¥${yuan(v.c.credit_limit)} · 已占用 ¥${yuan(v.st.used)} · 本单 ¥${yuan(pendSo.total)} · 超额 ¥${yuan(v.after - v.c.credit_limit)}`
+      });
+      pendSo.credit_ap = ap.no;
+      pendSo.note = (pendSo.note ? pendSo.note + ' / ' : '') + `审核将超额,已发起信用特批 ${ap.no} 待财务经理裁决`;
+    }
+    /* 留给现场:本单保持干净草稿,点「审核」即弹出信用特批动线 */
+    const liveSo = takeDraft(8000);
+    if (liveSo) breach(liveSo);
+
+    /* 历史放行:已审核订单曾走特批,放行后占用仍高于授信 */
+    const relSo = T.sales_order.filter(o => o.status === 'confirmed' && CUS[o.customer] && CUS[o.customer].used > 20000
+      && !pickedCredit[o.customer] && o.customer !== frozenCust && o.total >= 20000).sort((a, b) => b.total - a.total)[0];
+    if (relSo) {
+      const c = custOf(relSo.customer), st = CUS[relSo.customer];
+      c.credit_limit = Math.max(1e4, k10(st.used * .82));
+      const ap = apStart('credit', relSo.no, {
+        date: relSo.date, title: `信用特批 ${relSo.customer_name} · ${relSo.no}`, applicant: relSo.salesperson || '周寒峰',
+        role: '财务经理', amount: relSo.total, priority: 'urgent',
+        note: `额度 ¥${yuan(c.credit_limit)} · 已占用 ¥${yuan(st.used)} · 本单 ¥${yuan(relSo.total)}`
+      });
+      ap.status = 'approved'; ap.approver = '方静姝';
+      ap.opinion = `客户年度框架已签、当季回款计划确认,超额 ¥${yuan(Math.max(0, st.used - c.credit_limit))} 单笔授信放行,发货照常。`;
+      ap.time_done = relSo.date + ' 15:0' + (relSo.no.length % 10) + ':28';
+      relSo.credit_ap = ap.no;
+      relSo.note = (relSo.note ? relSo.note + ' / ' : '') + `信用特批 ${ap.no} 已放行,超额部分单笔授信`;
+    }
+
+    /* 使用率回写:≥80% 标记信用预警 */
+    T.customers.forEach(c => {
+      const st = CUS[c.code], lim = +c.credit_limit || 0;
+      if (c.credit_hold === 'hold' || !(lim > 0 && st.used / lim >= .8)) return;
+      c.credit_hold = 'watch';
+      const pct = Math.round(st.used / lim * 100);
+      c.note = (c.note ? c.note + ' / ' : '') + `信用预警:额度使用率 ${pct}%,新单需财务复核。`;
+    });
+    T.sales_order.forEach(o => { delete o._seenCredit; });
+
+    /* ---------- 金额分级会签:逐级签批、整链终止与驳回重提 ---------- */
+    /* 节点档位口径与 ACT.buildChain 一致;本段全程不取随机数,保证账簿基线可复现 */
+    function sgnNodes(baseRole, amount) {
+      const roles = [baseRole], why = {};
+      SCHEMA.SIGN_TIERS.forEach(t => { if (amount >= t.min) { roles.push(t.role); why[t.role] = t.why; } });
+      return roles.filter((r, i) => roles.indexOf(r) === i)
+        .map(r => Object.assign({ role: r, state: 'waiting' }, why[r] ? { tier: why[r] } : {}));
+    }
+    /** 第 i 级签批留痕;签完自动把下一级置为待签 */
+    function sgnSign(chain, i, name, at, opinion) {
+      const n = chain[i]; if (!n) return;
+      n.state = 'signed'; n.name = name; n.at = at; n.opinion = opinion;
+      if (chain[i + 1] && chain[i + 1].state === 'waiting') chain[i + 1].state = 'current';
+    }
+    /** 当前节点待签:轮候方重新计时一个 SLA 窗口 */
+    function sgnWait(ap, i, fromDay) {
+      const n = ap.chain[i];
+      ap.step = i; ap.role = n.role; n.state = 'current';
+      n.due = ap.due = addDays(fromDay, SCHEMA.SIGN_DUE[ap.priority] || 3) + ' 18:00:00';
+    }
+    /** 大额备货申请:整单行按目标金额摊到三个物料 */
+    function sgnPR(date, reason, target, dept, requester, base) {
+      const no = docNo('PR', 'purchase_req', date);
+      const rows = [0, 1, 2].map((k, i) => {
+        const p = PRODUCTS[(base + k) % PRODUCTS.length];
+        const qty = Math.max(60, Math.round(target / 3 / (p.cost || 120)));
+        const line = { doc: no, lineno: i + 1, product: p.code, product_name: p.name, qty, price: p.cost, amount: money(qty * p.cost), memo: '战略备货,参考标准成本' };
+        push('pr_lines', line);
+        return line;
+      });
+      return push('purchase_req', { no, date, dept, requester, need_date: addDays(date, 26), reason,
+        approver: '', status: 'pending', amount: money(rows.reduce((s, l) => s + l.amount, 0)), note: '' });
+    }
+
+    /* 在途三级会签:采购主管已签,财务经理节点已逾期 —— 演示「仅当前节点可签」+ 逾期预警 */
+    const prOver = sgnPR(addDays(today, -9), '年中大促战略备货:安全库存一次性锁定', 168000, '仓储物流部', '罗小满', 0);
+    const apOver = apStart('purchase_req', prOver.no, {
+      date: addDays(today, -8), title: `采购申请 ${prOver.no} · ${prOver.dept}`, applicant: prOver.requester,
+      role: '采购主管', amount: prOver.amount, priority: 'std',
+      note: `预估 ¥${yuan(prOver.amount)},达两级加签档位:${SCHEMA.SIGN_TIERS.map(t => `${yuan(t.min)} → ${t.role}`).join(' / ')}`
+    });
+    prOver.approval = apOver.no;
+    prOver.note = '会签中:采购主管已签批,财务经理节点已逾期,系统按剩余时限置顶催办。';
+    apOver.chain = sgnNodes('采购主管', apOver.amount);
+    sgnSign(apOver.chain, 0, '郑思远', addDays(today, -7) + ' 16:20:11', '备货量与年度框架计划一致,同意;资金占用请财务复核。');
+    sgnWait(apOver, 1, addDays(today, -7));
+    apOver.time_done = '';
+
+    /* 三级终审通过的历史会签:申请单已核准,可直接转采购订单 */
+    const prDone = sgnPR(addDays(today, -16), '跨季原材料锁价备货(供应商涨价预期)', 246000, '采购部', '孙未蹊', 3);
+    const apDone = apStart('purchase_req', prDone.no, {
+      date: addDays(today, -15), title: `采购申请 ${prDone.no} · ${prDone.dept}`, applicant: prDone.requester,
+      role: '采购主管', amount: prDone.amount, priority: 'urgent', note: `预估 ¥${yuan(prDone.amount)},金额超总经办签批线`
+    });
+    prDone.approval = apDone.no;
+    apDone.chain = sgnNodes('采购主管', apDone.amount);
+    sgnSign(apDone.chain, 0, '郑思远', addDays(today, -14) + ' 09:42:18', '比价三家,锁价窗口只剩两周,建议尽快核准。');
+    sgnSign(apDone.chain, 1, '方静姝', addDays(today, -13) + ' 15:07:52', `占用当季采购预算 ${Math.round(apDone.amount / 3200000 * 100)}%,预算内同意,付款按 NET60 安排。`);
+    apDone.chain[2].state = 'signed'; apDone.chain[2].name = '陈立群';
+    apDone.chain[2].at = addDays(today, -11) + ' 10:24:06';
+    apDone.chain[2].opinion = '金额较大但属战略锁价,同意下单,要求分两批到货以平滑现金流。';
+    apDone.status = 'approved'; apDone.step = 2; apDone.role = '系统管理员'; apDone.due = '';
+    apDone.approver = '陈立群(系统管理员)';
+    apDone.opinion = '三级会签全部通过,同意转采购订单。';
+    apDone.time_done = addDays(today, -11) + ' 10:24:06';
+    prDone.status = 'approved'; prDone.approver = '陈立群';
+    prDone.note = `三级会签 ${apDone.no} 已终审通过(采购主管 → 财务经理 → 总经办),可转采购订单。`;
+
+    /* 会签驳回 → 修改重提:一级签完在财务被否,整链终止后原样重提接续 */
+    const chgSo = T.sales_order.filter(o => o.status === 'confirmed' && o.total >= 30000 && !o.credit_ap).sort((a, b) => b.total - a.total)[0];
+    if (chgSo) {
+      const nd = addDays(chgSo.required_date, 12);
+      const summary = `需求到货日: ${chgSo.required_date} → ${nd};紧急度: 普通 → 加急`;
+      const apOld = apStart('so_change', chgSo.no, {
+        date: addDays(today, -9), title: `销售订单变更 ${chgSo.no}`, applicant: chgSo.salesperson || '周寒峰',
+        role: '销售主管', amount: chgSo.total, priority: 'std', note: summary
+      });
+      apOld.payload = { required_date: nd, priority: 'urgent' };
+      apOld.summary = summary;
+      apOld.chain = sgnNodes('销售主管', apOld.amount);
+      sgnSign(apOld.chain, 0, '林墨对白', addDays(today, -8) + ' 11:36:40', '客户已书面确认新交期,同意变更。');
+      apOld.chain[1].state = 'rejected'; apOld.chain[1].name = '方静姝';
+      apOld.chain[1].at = addDays(today, -6) + ' 17:12:03';
+      apOld.chain[1].opinion = '顺延 12 天会把两笔月结发票推到下期,资金占用超预算;请改为分批交付后再报。';
+      apOld.step = 1; apOld.role = '财务经理'; apOld.due = '';
+      apOld.status = 'rejected'; apOld.approver = '方静姝(财务经理)';
+      apOld.opinion = apOld.chain[1].opinion;
+      apOld.time_done = addDays(today, -6) + ' 17:12:03';
+
+      const apNew = apStart('so_change', chgSo.no, {
+        date: addDays(today, -4), title: `销售订单变更 ${chgSo.no}(重提)`, applicant: chgSo.salesperson || '周寒峰',
+        role: '销售主管', amount: chgSo.total, priority: 'std',
+        note: `按财务意见调整为分批交付:首批 ${nd} 前 60%,尾批顺延 7 天;原驳回意见见 ${apOld.no}`
+      });
+      apNew.payload = { required_date: nd, priority: 'urgent' };
+      apNew.summary = summary + ';交付方式: 一次性 → 分批两单';
+      apNew.resubmit_of = apOld.no; apNew.round = 2;
+      apOld.resubmit = apNew.no;
+      apNew.chain = sgnNodes('销售主管', apNew.amount);
+      sgnSign(apNew.chain, 0, '林墨对白', addDays(today, -3) + ' 10:05:22', '已与客户改成两批到货,现金流影响可接受,同意。');
+      sgnWait(apNew, 1, addDays(today, -3));
+      chgSo.note = (chgSo.note ? chgSo.note + ' / ' : '') + `订单变更 ${apOld.no} 财务驳回,已重提 ${apNew.no} 待财务复核`;
+    }
+
+    /* ---------- 价格策略:价目表主数据、取价阶梯与改价审批动线 ---------- */
+    /* 本段不取随机数:价格由物料标准价与历史成交推导,保证账簿基线与上游单据完全可复现 */
+    const bySO = {};
+    T.sales_order.forEach(o => bySO[o.no] = o);
+    const obs = {};        // 客户|物料 → 实际成交(加权平均、区间、销量)
+    const prodQty = {};    // 物料 → 全客户实际销量
+    T.so_lines.forEach(l => {
+      const o = bySO[l.doc];
+      if (!o || o.status === 'draft' || o.status === 'cancelled') return;
+      const net = money(l.price * (1 - (l.discount || 0)));
+      const k = o.customer + '|' + l.product;
+      const s = obs[k] || (obs[k] = { qty: 0, sum: 0, min: net, max: net });
+      s.qty += l.qty; s.sum += money(net * l.qty);
+      s.min = Math.min(s.min, net); s.max = Math.max(s.max, net);
+      prodQty[l.product] = (prodQty[l.product] || 0) + l.qty;
+    });
+    /** 价目行按 [起订量, 折扣系数, 行折让, 备注] 阶梯展开;含税口径按类目税率反算报价 */
+    function ladderRows(list, tiers, taxInc) {
+      const out = [];
+      list.forEach(p => tiers.forEach(t => out.push({
+        product: p.code, product_name: p.name, tier_qty: t[0],
+        price: taxInc ? money(p.price * t[1] * (1 + (p.tax_rate || 13) / 100)) : money(p.price * t[1]),
+        discount: t[2] || 0, cost: money(p.cost), std_price: money(p.price), memo: t[3] || ''
+      })));
+      return out;
+    }
+    /** 客户专属价:从该客户自己的成交里取加权平均价,并按标准价封顶 */
+    function custRows(cust, n) {
+      const items = [];
+      PRODUCTS.forEach(p => { const s = obs[cust.code + '|' + p.code]; if (s && s.qty > 0) items.push({ p, s }); });
+      items.sort((a, b) => b.s.qty - a.s.qty || a.p.code.localeCompare(b.p.code));
+      return items.slice(0, n).map(x => ({
+        product: x.p.code, product_name: x.p.name, tier_qty: 0,
+        price: money(Math.min(x.s.sum / x.s.qty, x.p.price)), discount: 0,
+        cost: money(x.p.cost), std_price: money(x.p.price),
+        memo: `近半年成交 ${x.s.qty} 件 · 区间 ¥${yuan(x.s.min)}~${yuan(x.s.max)}`
+      }));
+    }
+    /** 让利额:价差 × 实际销量,作为价目表核准的分级会签金额 */
+    const giveUp = rows => money(rows.reduce((s, l) => s + (l.price * (1 - (l.discount || 0)) - l.std_price) * (prodQty[l.product] || 0), 0));
+    const plLines = no => T.pl_lines.filter(l => l.doc === no);
+    const soLines = no => T.so_lines.filter(l => l.doc === no);
+    function plAdd(o) {
+      const no = docNo('PL', 'price_list', o.valid_from);
+      const rows = (o.rows || []).map((r, i) => push('pl_lines', Object.assign({ doc: no, lineno: i + 1 }, r)));
+      return push('price_list', { no, name: o.name, kind: o.kind, customer: o.customer || '', channel: o.channel || '',
+        category: o.category || '', currency: 'CNY', tax_included: o.tax_included || 'n', priority: o.priority,
+        margin_floor: o.margin_floor, valid_from: o.valid_from, valid_to: o.valid_to, lines_cnt: rows.length,
+        owner: o.owner || '林墨对白', status: o.status || 'approved', ap: '', note: o.note || '' });
+    }
+    const hot = PRODUCTS.slice().sort((a, b) => (prodQty[b.code] || 0) - (prodQty[a.code] || 0) || a.code.localeCompare(b.code));
+    const byCat = name => PRODUCTS.filter(p => p.category === name);
+
+    /* 全品类阶梯批发价:量大价优,四档起订 */
+    plAdd({ name: '2026 全品类阶梯批发价', kind: 'tier', priority: 50, margin_floor: .10,
+      valid_from: addDays(today, -150), valid_to: addDays(today, 215), rows: ladderRows(hot.slice(0, 12),
+        [[0, .97, 0, '基础批发价'], [100, .93, 0, '满 100 件'], [300, .89, 0, '满 300 件'], [600, .85, 0, '满 600 件,需季度返利协议']]),
+      owner: '郑思远', note: '按近半年动销 TOP12 设置阶梯,阶梯价对标准售价的最大让利已进入会签金额测算。' });
+    /* 渠道协议价:平台开票口径为含税报价,取价时按类目税率反算未税成交单价 */
+    ['tmall', 'jd'].forEach((ch, i) => plAdd({ name: `${SCHEMA.entities.sales_order.fields.channel.opts[ch]}协议价`, kind: 'channel',
+      channel: ch, tax_included: 'y', priority: 30 + i, margin_floor: .12, valid_from: addDays(today, -120), valid_to: addDays(today, 245),
+      rows: ladderRows(hot.slice(12 * i, 12 * i + 16), [[0, [.95, .93][i], 0, ch === 'tmall' ? '平台佣金由售价内消化' : '自营账扣后净价']], true),
+      owner: '周寒峰', note: '平台报价含 13% 增值税,取价引擎折算未税成交单价后再比毛利红线。' }));
+    plAdd({ name: '亚马逊跨境离岸价', kind: 'channel', channel: 'amazon', priority: 33, margin_floor: .08,
+      valid_from: addDays(today, -90), valid_to: addDays(today, 275), rows: ladderRows(hot.slice(24, 36), [[0, .88, 0, 'FOB 离岸,不含头程运费']], false),
+      owner: '吴清越', note: '外贸客户按离岸价成交,红线毛利率放宽至 8%(汇率与认证费用前置)。' });
+    /* 类目协议价 */
+    [['数码配件', .90, 40], ['个护美妆', .92, 42]].forEach(x => plAdd({ name: `${x[0]}类目协议价`, kind: 'category', category: x[0],
+      priority: x[2], margin_floor: .10, valid_from: addDays(today, -100), valid_to: addDays(today, 260),
+      rows: ladderRows(byCat(x[0]), [[0, x[1], 0, '类目统一折扣']], false), owner: '郑思远',
+      note: x[0] === '个护美妆' ? '短保管线出库强制 FEFO,促销批次不得跨期串货。' : '类目协议价与阶梯批发价并行,取价引擎按客户→渠道→类目→阶梯逐级回落。' }));
+    /* 促销特价:窗口即将到期,含两行深亏清仓价(需核准后才允许成交) */
+    /** 成本加成行:清仓尾货按成本上方 N% 报价,可能压破毛利红线 */
+    function costPlus(list, markup, memo) {
+      return list.map(p => ({ product: p.code, product_name: p.name, tier_qty: 0,
+        price: money(p.cost * markup), discount: 0, cost: money(p.cost), std_price: money(p.price), memo }));
+    }
+    plAdd({ name: '季末清仓促销价', kind: 'promo', priority: 20, margin_floor: .05,
+      valid_from: addDays(today, -6), valid_to: addDays(today, 11),
+      rows: ladderRows(hot.slice(36, 46), [[0, .82, 0, '季末促销']], false)
+        .concat(costPlus(hot.slice(46, 48), 1.02, '残次尾货清仓:低于 5% 毛利红线,凭本表核准成交')),
+      owner: '林墨对白', note: '生效窗口即将到期;两行尾货价压至成本上方 2%,已越过 5% 毛利红线,凭价目表核准放行。' });
+    /* 客户专属价:从 KA 客户实际成交折算 */
+    const ka = T.customers.filter(c => c.type === 'KA 重点客户' && c.status === 'enabled').slice(0, 3);
+    ka.forEach((c, i) => {
+      const rows = custRows(c, 8);
+      if (!rows.length) return;
+      plAdd({ name: `${c.name}专属协议价`, kind: 'customer', customer: c.code, priority: 10 + i, margin_floor: .12,
+        valid_from: addDays(today, -140 + i * 20), valid_to: addDays(today, 225), rows,
+        owner: c.salesperson, note: `价格取自该客户近半年加权平均成交价,共 ${rows.length} 个物料;未覆盖物料自动回落到阶梯/类目价。` });
+    });
+    /* 已失效的历史专属价:验证取价窗口,过期即不再引用 */
+    const lost = T.customers.filter(c => c.status === 'enabled' && c.type === '连锁门店')[0];
+    if (lost) {
+      const rows = custRows(lost, 5);
+      if (rows.length) plAdd({ name: `${lost.name}2025 年度价(已到期)`, kind: 'customer', customer: lost.code, priority: 15,
+        margin_floor: .12, valid_from: addDays(today, -260), valid_to: addDays(today, -12), rows, owner: lost.salesperson,
+        note: '协议到期未续签:取价引擎按有效期过滤,本表已自动退出引用范围,该客户现按阶梯批发价成交。' });
+    }
+
+    /* 草稿 / 在途 / 被驳回三种状态各一张,演示价目表自身的核准链路 */
+    const plDraft = plAdd({ name: '抖音小店渠道价(待提交)', kind: 'channel', channel: 'douyin', tax_included: 'y',
+      priority: 35, margin_floor: .12, valid_from: addDays(today, 3), valid_to: addDays(today, 183),
+      rows: ladderRows(hot.slice(48, 60), [[0, .9, 0, '达人带货佣金另计']], true), status: 'draft', owner: '孙未蹊',
+      note: '新渠道开通提案,尚未提交核准,因此不会被取价引擎引用。' });
+    const plPend = plAdd({ name: '家居用品大客户年返', kind: 'category', category: '家居用品', priority: 44, margin_floor: .06,
+      valid_from: addDays(today, 1), valid_to: addDays(today, 181), rows: ladderRows(byCat('家居用品'), [[0, .85, .01, '年返 1% 折让']], false),
+      status: 'pending', owner: '林墨对白', note: '让利金额触发多级会签,签完次月生效。' });
+    const guPend = giveUp(plLines(plPend.no));
+    const apPL = apStart('price_list', plPend.no, { date: addDays(today, -2), title: `${plPend.name} 生效核准`,
+      applicant: plPend.owner, role: '销售主管', amount: Math.abs(guPend), priority: 'std',
+      note: `${plPend.lines_cnt} 个价格行,相对标准售价让利 ¥${yuan(Math.abs(guPend))}(按近半年实际销量折算)· 红线毛利率 6.0%` });
+    apPL.chain = sgnNodes('销售主管', apPL.amount);
+    if (apPL.chain.length > 1) {
+      sgnSign(apPL.chain, 0, '林墨对白', addDays(today, -1) + ' 14:08:26', '年返折算后仍在毛利红线之上,同意生效。');
+      sgnWait(apPL, 1, addDays(today, -1));
+    } else {
+      sgnWait(apPL, 0, addDays(today, -2));
+    }
+    plPend.ap = apPL.no;
+    plPend.note += ` / 已提交核准 ${apPL.no}${apPL.chain.length > 1 ? `(共 ${apPL.chain.length} 级会签),销售主管已签,待${apPL.chain[1].role}复核` : ',待销售主管裁决'}`;
+
+    const plRej = plAdd({ name: '618 复盘清仓价(被驳回)', kind: 'promo', priority: 22, margin_floor: .05,
+      valid_from: addDays(today, -160), valid_to: addDays(today, -30), rows: ladderRows(hot.slice(30, 40), [[0, .72, 0, '大促清仓']], false),
+      status: 'rejected', owner: '周寒峰', note: '让利超出当季预算,已按财务意见压回促销档位重报。' });
+    const guRej = giveUp(plLines(plRej.no));
+    const apRej = apStart('price_list', plRej.no, { date: addDays(today, -170), title: `${plRej.name} 生效核准`,
+      applicant: plRej.owner, role: '销售主管', amount: Math.abs(guRej), priority: 'urgent',
+      note: `${plRej.lines_cnt} 个价格行,让利 ¥${yuan(Math.abs(guRej))}` });
+    apRej.chain = sgnNodes('销售主管', apRej.amount);
+    sgnSign(apRej.chain, 0, '林墨对白', addDays(today, -168) + ' 10:22:41', '清仓回笼资金,同意。');
+    const rejNode = apRej.chain[1] || apRej.chain[0];
+    rejNode.state = 'rejected'; rejNode.name = '方静姝'; rejNode.at = addDays(today, -166) + ' 16:35:09';
+    rejNode.opinion = '折后毛利率不足 6%,且与季末促销窗口重叠造成双重让利;请改按 8 折重报并缩短有效期。';
+    apRej.step = apRej.chain.indexOf(rejNode); apRej.role = rejNode.role; apRej.due = '';
+    apRej.status = 'rejected'; apRej.approver = `方静姝(${rejNode.role})`; apRej.opinion = rejNode.opinion;
+    apRej.time_done = rejNode.at;
+    apRej.chain.forEach((n, i) => { if (i > apRej.step && n.state === 'waiting') n.state = 'skipped'; });
+    plRej.ap = apRej.no;
+    plRej.note += ` / 核准单 ${apRej.no} 被财务驳回:${rejNode.opinion}`;
+
+    /* 改价审批动线:草稿单挂 在途 / 已通过 / 被驳回 三态,另留一张无审批的越权低价单演示红线拦截 */
+    const dft = T.sales_order.filter(o => o.status === 'draft' && !o.credit_ap && !o.price_ap)
+      .sort((a, b) => b.total - a.total);
+    /** 取订单金额最大的一行作为改价对象 */
+    const bigLine = so => soLines(so.no).slice().sort((a, b) => b.qty * b.price - a.qty * a.price)[0] || null;
+    /** 成交时点的成本与红线价:口径与 ACT.priceCost / priceFloor 一致 */
+    function costOf(so, l) {
+      const p = PRODUCTS.find(x => x.code === l.product) || {};
+      const s = T.stock.find(x => x.product === l.product && x.warehouse === so.warehouse) || {};
+      return money(s.cost || p.cost || 0);
+    }
+    const SIGN_NAMES = ['林墨对白', '方静姝', '陈立群'];
+    ['pending', 'approved', 'rejected'].forEach((state, i) => {
+      const so = dft[i];
+      if (!so) return;
+      const l = bigLine(so);
+      if (!l) return;
+      const cost = costOf(so, l);
+      const reqPrice = money(cost * (state === 'rejected' ? 1.03 : 1.02));
+      const refNet = money(l.price * (1 - (l.discount || 0)));      // 改价前按价目表/标准价的净价
+      const rows = [{ lineno: l.lineno, product: l.product, product_name: l.product_name, qty: l.qty,
+        old_price: l.price, new_price: reqPrice, old_discount: l.discount || 0, new_discount: 0,
+        cost, floor: money(cost * 1.05), list_price: refNet, list_src: '标准售价 · 物料主数据',
+        impact: money((reqPrice - refNet) * l.qty) }];
+      const amount = Math.abs(rows[0].impact);
+      const ap = apStart('price_change', so.no, { date: addDays(today, -5 + i), title: `改价申请 ${so.customer_name} · ${so.no}`,
+        applicant: so.salesperson || '林墨对白', role: '销售主管', amount, priority: amount >= 30000 ? 'urgent' : 'std',
+        note: `1 行调价,收入影响 ¥${yuan(rows[0].impact)} · 订单额 ¥${yuan(so.total)} · 客户压价,请求按成本上方 2%~3% 成交` });
+      ap.payload = { rows, reason: '竞品低价抢单,客户承诺下季度返单补偿毛利' };
+      ap.chain = sgnNodes('销售主管', ap.amount);
+      if (state === 'pending') {
+        sgnWait(ap, 0, addDays(today, -5 + i));
+        l.price = reqPrice; l.discount = 0; l.cost = cost; l.price_src = `改价待批 ${ap.no}`;
+        so.total = docTotal(soLines(so.no));
+        so.price_ap = ap.no;
+        so.note = (so.note ? so.note + ' / ' : '') + `改价待批 ${ap.no}:行 ${l.lineno} ${l.product_name} 已按 ¥${yuan(reqPrice)} 报价(价目表净价 ¥${yuan(refNet)}),销售主管未签,本单审核会被毛利红线拦截`;
+      } else if (state === 'approved') {
+        ap.chain.forEach((n, k) => { n.state = 'signed'; n.name = SIGN_NAMES[k] || '陈立群';
+          n.at = addDays(today, -4 + k) + ' 1' + (k + 2) + ':08:12';
+          n.opinion = k ? '单笔授信已计入当季折扣预算,同意。' : '客户为战略 KA,同意按红线让价一次。'; });
+        ap.status = 'approved'; ap.step = ap.chain.length - 1; ap.role = ap.chain[ap.step].role; ap.due = '';
+        ap.approver = `${ap.chain[ap.step].name}(${ap.chain[ap.step].role})`;
+        ap.opinion = `${ap.chain.length} 级会签全部通过,单价已回写订单行。`;
+        ap.time_done = ap.chain[ap.step].at;
+        l.price = reqPrice; l.discount = 0; l.cost = cost; l.price_src = `改价审批 ${ap.no}`;
+        so.total = docTotal(soLines(so.no));
+        so.price_ap = ap.no;
+        so.note = (so.note ? so.note + ' / ' : '') + `改价审批 ${ap.no} 已通过,行 ${l.lineno} 单价回写为 ¥${yuan(reqPrice)},低于 5% 毛利红线但已获授权`;
+      } else {
+        sgnSign(ap.chain, 0, '林墨对白', addDays(today, -3) + ' 09:40:15', '客户诉求已记录,但让价幅度需财务确认。');
+        const rn = ap.chain[1] || ap.chain[0];
+        rn.state = 'rejected'; rn.name = '方静姝'; rn.at = addDays(today, -2) + ' 15:12:47';
+        rn.opinion = '成本上方 3% 仍不足以覆盖仓储与资金占用,建议改走信用分期或按季末促销档成交。';
+        ap.step = ap.chain.indexOf(rn); ap.role = rn.role; ap.due = '';
+        ap.status = 'rejected'; ap.approver = `方静姝(${rn.role})`; ap.opinion = rn.opinion; ap.time_done = rn.at;
+        ap.chain.forEach((n, k) => { if (k > ap.step && n.state === 'waiting') n.state = 'skipped'; });
+        so.price_ap = ap.no;
+        so.note = (so.note ? so.note + ' / ' : '') + `改价审批 ${ap.no} 被驳回,请按价目表价重新报价或改走季末促销档`;
+      }
+    });
+    /* 再造一张全新草稿单:两行按价目表取价、一行越权低价,点「审核」时由毛利红线精准拦截 */
+    {
+      const c = ka[0] || T.customers[0];
+      const custList = T.price_list.filter(p => p.kind === 'customer' && p.customer === c.code)[0];
+      const cl = custList ? plLines(custList.no)[0] : null;
+      const whCost = code => money((T.stock.find(s => s.product === code && s.warehouse === MAIN_WH) || {}).cost || (PRODUCTS.find(p => p.code === code) || {}).cost || 0);
+      const pickP = cl ? PRODUCTS.find(x => x.code === cl.product) : hot[0];
+      const rows = [
+        { p: pickP, qty: 120, price: cl ? cl.price : money(hot[0].price * .97), listNo: cl ? custList.no : 'PL2026-0001',
+          src: cl ? `客户专属价 · ${custList.no}` : '阶梯批发价 · PL2026-0001' },
+        { p: hot[1], qty: 320, price: money(hot[1].price * .89), listNo: 'PL2026-0001', src: '阶梯批发价 · PL2026-0001(满 300 件档)' },
+        { p: hot[3], qty: 60, price: money(whCost(hot[3].code) * 1.02), listNo: '', src: '销售员手工改价(低于毛利红线)' }
+      ].filter(r => r.p);
+      const date = addDays(today, -1);
+      const no = docNo('SO', 'sales_order', date);
+      const lines = rows.map((r, i) => push('so_lines', { doc: no, lineno: i + 1, product: r.p.code, product_name: r.p.name,
+        qty: r.qty, delivered: 0, price: r.price, discount: 0, tax_rate: r.p.tax_rate, cost: whCost(r.p.code), list_no: r.listNo, price_src: r.src }));
+      push('sales_order', { no, date, customer: c.code, customer_name: c.name, warehouse: MAIN_WH,
+        required_date: addDays(date, 6), currency: 'CNY', payment_terms: c.payment_terms, channel: 'b2b', priority: 'urgent',
+        salesperson: c.salesperson, status: 'draft', total: docTotal(lines),
+        price_note: '取价引擎按 客户专属 → 促销 → 渠道 → 类目 → 阶梯 逐级命中;行 3 未走价目表',
+        note: `低价抢单待裁决:行 3 ${lines[2].product_name} 净价 ¥${yuan(lines[2].price)} 低于毛利红线 ¥${yuan(money(lines[2].cost * 1.05))},需在订单详情发起「申请改价」` });
+    }
+
+    /* ---------- 计划:BOM 物料清单(把已投产的委外配方固化为工程清单) ---------- */
+    /* 本段不取随机数:清单来自新品配方与原料主档,账簿基线与上游单据完全可复现 */
+    const rmOf = i => T.products.find(p => p.code === RM[i]) || null;
+    const nkOf = i => { const n = NEWSKUS[i]; return n ? (T.products.find(p => p.code === n.code) || null) : null; };
+    /* 层数口径镜像 ACT.BOM.depthOf:父件算第 1 层,子件行算第 2 层,自制子件按自己的清单继续下钻 */
+    function bomDepthOf(rows) {
+      if (!rows.length) return 1;
+      let h = 0;
+      rows.forEach(l => {
+        const sub = T.bom.find(b => b.product === l.product && b.status === 'approved');
+        h = Math.max(h, sub ? bomDepthOf(T.bom_lines.filter(x => x.doc === sub.no)) : 1);
+      });
+      return 1 + h;
+    }
+    function bomAdd(o) {
+      const no = docNo('BM', 'bom', o.effect_from);
+      const rows = o.rows.filter(r => r[0]).map((r, i) => push('bom_lines', {
+        doc: no, lineno: i + 1, product: r[0].code, product_name: r[0].name, uom: r[0].uom || 'PCS',
+        qty: r[1], loss_rate: r[2] || 0, cost: money(r[0].cost), amount: money(r[1] * (1 + (r[2] || 0)) * r[0].cost),
+        key_part: r[4] || 'n', substitute: '', position: r[3] || '', memo: r[5] || '' }));
+      const mat = money(rows.reduce((s, l) => s + l.amount, 0));
+      const b = push('bom', { no, name: o.name, product: o.product.code, product_name: o.product.name, version: o.version,
+        mrp_src: o.src, warehouse: o.wh || MAIN_WH, base_qty: 1, effect_from: o.effect_from, effect_to: o.effect_to || '',
+        lines_cnt: rows.length, levels: bomDepthOf(rows), mat_cost: mat, owner: o.owner || '温叙白',
+        status: o.status || 'approved', ap: o.ap || '', note: o.note || '' });
+      o.product.mrp_src = o.src;
+      if (b.status === 'approved') o.product.bom_no = b.no;
+      if (o.moq) o.product.moq = o.moq;
+      return b;
+    }
+    /* 配方与委外加工单同源:单件耗用 = 已发料量 ÷ 计划加工数,损耗率由工程按实盘损耗回填 */
+    const RECIPES = [
+      [0, [[rmOf(0), .14, .03, '裁片'], [rmOf(7), 1, 0, '五金']], 'out', 2.10, 400],
+      [1, [[rmOf(0), .16, .02, '裁片'], [rmOf(7), 1, 0, '五金']], 'out', 2.90, 400],
+      [2, [[rmOf(5), .038, .05, '下料'], [rmOf(7), 2, .01, '铆接']], 'out', 4.80, 300],
+      [3, [[rmOf(0), .12, .03, '面料'], [rmOf(3), .015, .04, '软胶']], 'out', 3.60, 400],
+      [4, [[rmOf(4), 1, .01, '泵头'], [rmOf(3), .02, .04, '密封圈']], 'make', 1.20, 600],
+      [5, [[rmOf(1), .10, .06, '注芯'], [rmOf(0), .03, .04, '外套'], [rmOf(2), .05, .02, '端盖']], 'out', 4.60, 300],
+    ];
+    const kitBoms = [];
+    RECIPES.forEach((rc, i) => {
+      const p = nkOf(i);
+      if (!p) return;
+      kitBoms.push(bomAdd({ product: p, name: `${p.name} 制造清单`, version: 'V2.0', src: rc[2],
+        rows: rc[1], effect_from: addDays(today, -150), moq: rc[5],
+        note: `清单由 ${p.name} 的委外投产记录固化:加工费核定 ¥${yuan(rc[4])}/件,损耗率按近三批实盘回填。` }));
+      /* 同一父件的上一版:面料单耗更高,已作废留档,验证 bomFor 只认最新生效版 */
+      if (i === 0) bomAdd({ product: p, name: `${p.name} 制造清单(旧版)`, version: 'V1.0', src: rc[2],
+        rows: [[rmOf(0), .15, 0, '裁片']], effect_from: addDays(today, -240), effect_to: addDays(today, -151),
+        status: 'obsolete', note: 'V1.0 未计裁片损耗,单耗偏高 7%;ECM 变更后由 V2.0 取代,仅作历史留档不再参与展开。' });
+    });
+    /* 组套成品:把两张已核准清单合成一个套装 SKU,形成三级结构(组套 → 半成品 → 原料) */
+    const kitA = nkOf(5), kitB = nkOf(3);
+    let kitSku = null;
+    if (kitA && kitB) {
+      const comps = [[kitA, 1, 0, '主件', 'y'], [kitB, 1, 0, '配件'], [rmOf(0), .05, .02, '内衬袋'], [rmOf(7), 1, 0, '束带']];
+      const rollCost = money(comps.filter(c => c[0]).reduce((s, c) => s + c[1] * (1 + (c[2] || 0)) * c[0].cost, 0));
+      kitSku = push('products', {
+        code: (CATKEY[kitA.category] || 'HM') + '-901', name: '双件优选组套(渠道专供)', category: kitA.category, brand: 'Sailfish',
+        spec: '组套 SKU:由两张已核准清单合成',
+        listing: 'offline', moq: 200, uom: 'SET', barcode: '6920261100901', cost: rollCost, price: money(rollCost * 1.58),
+        tax_rate: 13, weight: 2600, safety_qty: 60, lead_time: 18, shelf_life: 0, status: 'enabled', color: '燕麦米',
+        mrp_src: 'make', note: '渠道专供组套:不单独采购,由中心仓按 BOM 领用半成品与包材装配而成。' });
+      bomAdd({ product: kitSku, name: '双件优选组套 装配清单', version: 'V1.0', src: 'make',
+        rows: comps, effect_from: addDays(today, -60), moq: 200, owner: '何砚舟',
+        note: '三级结构:组套 → 半成品(自带清单)→ 原料。MRP 展开时按本表把组套需求逐层引爆到原料层。' });
+      /* 提案版:增加香薰配件,尚未提交核准,因此今天仍按 V1.0 展开 */
+      bomAdd({ product: kitSku, name: '双件优选组套 装配清单(三件装提案)', version: 'V2.0', src: 'make',
+        rows: comps.concat([[rmOf(4), 1, 0, '泵头组件']]), effect_from: addDays(today, 5), status: 'draft', owner: '何砚舟',
+        note: '拟在双件装基础上追加泵头配件;草稿未核准,取价与计划运算均不引用,核准生效后自动压掉 V1.0。' });
+    }
+    /* 在途版:一张待核准的清单挂着多级会签,演示 BOM 自身的变更审批动线 */
+    const pendParent = nkOf(2);
+    if (pendParent && kitBoms.length) {
+      const pb = bomAdd({ product: pendParent, name: `${pendParent.name} 制造清单(V3.0 变更)`, version: 'V3.0', src: 'out',
+        rows: [[rmOf(5), .034, .03, '下料'], [rmOf(7), 2, 0, '铆接'], [rmOf(6), .02, .05, '垫片']],
+        effect_from: addDays(today, 3), status: 'pending', owner: '温叙白', moq: 300,
+        note: '变更点:铝管单耗由 0.038 降至 0.034(改为薄壁料)并新增垫片一道;生效后单件材料成本下降,需财务复核年度影响额。' });
+      const annual = money(pb.mat_cost * 3000);
+      const apBom = apStart('bom', pb.no, { date: addDays(today, -1), title: `${pendParent.name} BOM V3.0 发布核准`,
+        applicant: '温叙白', role: '采购主管', amount: annual, priority: 'std',
+        note: `${pb.lines_cnt} 项子件 · 单件材料成本 ¥${yuan(pb.mat_cost)} · 按明年 3000 件投产测算影响额 ¥${yuan(annual)}` });
+      pb.ap = apBom.no;
+      apBom.chain = sgnNodes('采购主管', apBom.amount);
+      if (apBom.chain.length > 1) {
+        sgnSign(apBom.chain, 0, '郑思远', addDays(today, -1) + ' 16:20:11', '薄壁料已通过 3 万件试产验证,单耗下降属实,供应可行,同意切换。');
+        sgnWait(apBom, 1, today);
+      } else { apBom.status = 'pending'; apBom.due = addDays(today, 3) + ' 18:00:00'; }
+    }
+    /* 供应方式基线:原料与在售单品一律外购,已建清单的父件按清单口径投产 */
+    T.products.forEach(p => { if (!p.mrp_src) p.mrp_src = 'buy'; });
+
     /* ---------- 期初建账 + 存货成本差异结转 ---------- */
     const openStock = money(T.stock_movements.filter(m => m.ref === '期初建账').reduce((s, m) => s + m.amount, 0));
     const openCash = money(Math.max(6800000, openStock * 1.8));
@@ -1261,7 +2049,7 @@ window.SEED = (function () {
     /* 存货账实核对:库存子账金额逐笔来自流水、流水逐笔对应凭证,不再需要事后差异调整 */
     const bookValue = money(T.stock.reduce((s, r) => s + (r.value || 0), 0));
     const glValue = money(T.journal_lines.filter(l => l.account === '1405').reduce((s, l) => s + (l.debit || 0) - (l.credit || 0), 0));
-    const irBook = money(T.gr.filter(g => g.status !== 'settled').reduce((s, g) => s + (g.amount || 0), 0));
+    const irBook = money(T.gr.filter(g => g.status !== 'settled' && g.status !== 'returned').reduce((s, g) => s + (g.amount || 0), 0));
     const glIR = money(T.journal_lines.filter(l => l.account === '2203').reduce((s, l) => s + (l.credit || 0) - (l.debit || 0), 0));
     if (Math.abs(bookValue - glValue) > .05) console.warn('[seed] 库存子账与总账 1405 不平:', bookValue, glValue);
     if (Math.abs(irBook - glIR) > .05) console.warn('[seed] 未清算收货与应付暂估 2203 不平:', irBook, glIR);

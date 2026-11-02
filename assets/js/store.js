@@ -3,7 +3,7 @@
  * ============================================================ */
 window.DB = (function () {
   const KEY = 'sailfish_erp_db_v1';
-  const SEED_VERSION = 'sfe-2026.11-K';
+  const SEED_VERSION = 'sfe-2026.11-Z';
 
   let mem = null;               // { tables:{...}, seq:{...}, seedVersion, meta }
   let storageOK = true;

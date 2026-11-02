@@ -49,10 +49,31 @@ window.SCHEMA = (function () {
     repairing: { l: '维修中', c: 'b-warning' },
     /* 暂估清算 / 质检 / 关账 */
     settled: { l: '已清算', c: 'b-success' },
+    returned: { l: '退货结案', c: 'b-neutral' },
     to_check: { l: '待质检', c: 'b-warning' },
-    rejected_qty: { l: '拒收退货', c: 'b-danger' },
+    pass: { l: '合格放行', c: 'b-success' },
+    concession: { l: '让步接收', c: 'b-warning' },
+    reject: { l: '拒收退货', c: 'b-danger' },
+    /* 批次追溯 */
+    frozen: { l: '已冻结', c: 'b-danger' },
+    expired: { l: '已过效期', c: 'b-warning' },
+    consumed: { l: '已发完', c: 'b-neutral' },
+    /* 库区:隔离区用警示色,正品在存储与拣货区之间流转 */
+    rcv: { l: '收货车位', c: 'b-info' },
+    stg: { l: '存储区', c: 'b-primary' },
+    pick: { l: '拣货区', c: 'b-success' },
+    qcd: { l: '待检隔离区', c: 'b-warning' },
+    def: { l: '残次冻结区', c: 'b-danger' },
+    /* 信用风控 */
+    watch: { l: '信用预警', c: 'b-warning' },
+    hold: { l: '信用冻结', c: 'b-danger' },
+    released: { l: '已释放', c: 'b-success' },
     locked: { l: '已关账', c: 'b-neutral' },
     open_period: { l: '未关账', c: 'b-success' },
+    /* 计划:BOM 版本生命周期与 MRP 运算 */
+    obsolete: { l: '已作废', c: 'b-neutral' },
+    computed: { l: '已运算', c: 'b-info' },
+    dispatched: { l: '已下达', c: 'b-purple' },
   };
 
   const YESNO = { y: '是', n: '否' };
@@ -63,6 +84,25 @@ window.SCHEMA = (function () {
     COD: '货到付款', NET30: '月结 30 天', NET45: '月结 45 天', NET60: '月结 60 天',
     PRE100: '100% 预付', PRE50: '50% 预付 + 尾款到货付'
   };
+  /* 来料质检:待检仓编码与供应商质检策略(必检到货先入待检仓,判定后才可销售/领用) */
+  const QC_WH = 'WH-QC01';
+  const WH_KIND = { stock: '正式仓', qc: '待检仓', defect: '残次仓' };
+  const QC_POLICY = { strict: '批批全检', normal: '抽样检验 AQL', skip: '免检(供应商认证)' };
+  /* 抽样判定基准:GB/T 2828.1 一般检验水平 II, AQL=1.0 的简化档位 */
+  const AQL_PLAN = [[15, 1, 0], [45, 8, 0], [150, 20, 1], [500, 32, 1], [1200, 50, 2], [Infinity, 80, 3]];
+  /* 库区:批次落位的物理分区,待检/残次区禁止销售领用 */
+  const ZONES = { rcv: '收货车位', stg: '存储区', pick: '拣货区', qcd: '待检隔离区', def: '残次冻结区' };
+  /* 批次出库分配规则:先到期(FEFO)再先进先出,同价时按批次号 */
+  const ISSUE_RULES = { fefo: '先到期先出 FEFO', fifo: '先进先出 FIFO', manual: '手工指定批次' };
+  const LOT_SOURCE = { init: '期初建账', po_receipt: '采购入库', os_receive: '委外收回', so_return: '退货入库',
+    stocktake_plus: '盘盈入账', manual: '手工调整' };
+  /* 库位编码 HZ-A01-03:仓库简称 + 库区排号 + 货位号 */
+  const WH_SHORT = { 'WH-HZ01': 'HZ', 'WH-GZ02': 'GZ', 'WH-TJ03': 'TJ', 'WH-CD04': 'CD', 'WH-RF05': 'RF', 'WH-QC01': 'QCD' };
+  /* 计划口径:物料的供应方式决定 MRP 建议落成哪一种单据 */
+  const MRP_SRC = { buy: '外购采购', out: '委外加工', make: '自制装配' };
+  const MRP_SUGGEST = { PR: '采购申请', OS: '委外加工单' };
+  /* 需求来源:未履约订单=按订单缺口起算,补货=按安全库存起算,人工=按录入数量起算 */
+  const MRP_DEMAND = { so_open: '未履约销售订单', safety: '安全库存补货', manual: '人工指定需求' };
 
   const E = {
     /* ---------------- 基础数据 ---------------- */
@@ -84,8 +124,11 @@ window.SCHEMA = (function () {
         price: { t: 'money', l: '标准售价', sum: true },
         tax_rate: { t: 'select', l: '税率', opts: { 13: '13%', 9: '9%', 6: '6%', 0: '免税' }, hide: true, dec: 0 },
         weight: { t: 'int', l: '毛重(g)', hide: true },
+        mrp_src: { t: 'select', l: '供应方式', opts: MRP_SRC, badge: 1 },
+        bom_no: { t: 'ref', l: '默认 BOM', ref: 'bom', key: 'no', hide: true },
         safety_qty: { t: 'int', l: '安全库存' },
         lead_time: { t: 'int', l: '采购提前期(天)', hide: true },
+        shelf_life: { t: 'int', l: '保质期(天)', hide: true },
         status: { t: 'select', l: '状态', opts: { enabled: 1, disabled: 1 }, badge: 1 },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
       }
@@ -104,10 +147,128 @@ window.SCHEMA = (function () {
         address: { t: 'text', l: '地址', hide: true, full: 1 },
         tax_id: { t: 'text', l: '纳税人识别号', hide: true },
         credit_limit: { t: 'money', l: '信用额度', sum: true },
+        credit_hold: { t: 'select', l: '信用状态', opts: { normal: 1, watch: 1, hold: 1 }, badge: 1 },
         payment_terms: { t: 'select', l: '结算方式', opts: PAYTERM, hide: true },
         salesperson: { t: 'text', l: '负责销售', hide: true },
         status: { t: 'select', l: '状态', opts: { enabled: 1, disabled: 1 }, badge: 1 },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    price_list: {
+      label: '价目表 / 价格策略', table: '价格策略 (md_price_list)', pk: 'no', prefix: 'PL', icon: 'wallet', doc: 'pl_lines',
+      statusField: 'status', nextSeqField: 'valid_from',
+      fields: {
+        no: { t: 'code', l: '价目表编号' },
+        name: { t: 'text', l: '价目表名称' },
+        kind: { t: 'select', l: '价格类型', opts: { std: '标准售价', tier: '阶梯批发价', channel: '渠道协议价', category: '类目协议价', customer: '客户专属价', promo: '促销特价' }, badge: 1 },
+        customer: { t: 'ref', l: '适用客户', ref: 'customers', key: 'code' },
+        channel: { t: 'select', l: '适用渠道', opts: { offline: '线下门店', tmall: '天猫旗舰店', jd: '京东自营', douyin: '抖音小店', amazon: '亚马逊跨境', b2b: 'B2B 批发' }, hide: true },
+        category: { t: 'select', l: '适用类目', opts: CATS, hide: true },
+        currency: { t: 'select', l: '币种', opts: CURRENCY, hide: true },
+        tax_included: { t: 'select', l: '报价口径', opts: { n: '未税单价', y: '含税单价' }, hide: true },
+        priority: { t: 'int', l: '取价优先级', hide: true, dec: 0 },
+        margin_floor: { t: 'percent', l: '最低毛利率', hide: true },
+        valid_from: { t: 'date', l: '生效日' },
+        valid_to: { t: 'date', l: '失效日' },
+        lines_cnt: { t: 'int', l: '价格行数', ro: 1, dec: 0 },
+        owner: { t: 'text', l: '维护人', hide: true },
+        status: { t: 'select', l: '状态', opts: { draft: 1, pending: 1, approved: 1, rejected: 1 }, badge: 1, ro: 1 },
+        ap: { t: 'ref', l: '审批单', ref: 'approval', key: 'no', hide: true },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    pl_lines: {
+      label: '价目表行', hidden: true, parent: 'price_list',
+      fields: { doc: { t: 'text' }, lineno: { t: 'int' }, product: { t: 'ref', ref: 'products' }, product_name: { t: 'text' },
+        tier_qty: { t: 'int' }, price: { t: 'money' }, discount: { t: 'percent' }, cost: { t: 'money' }, std_price: { t: 'money' }, memo: { t: 'text' } }
+    },
+    /* ---------------- 计划:物料清单与 MRP ---------------- */
+    /* BOM 只描述"做一件要耗多少料",数量口径 = 单件用量 ×(1 + 损耗率);层级由展开引擎实时算,不落库 */
+    bom: {
+      label: '物料清单 BOM', table: '物料清单 (md_bom)', pk: 'no', prefix: 'BM', icon: 'layers', doc: 'bom_lines',
+      statusField: 'status', nextSeqField: 'effect_from',
+      fields: {
+        no: { t: 'code', l: 'BOM 编号' },
+        name: { t: 'text', l: '清单名称' },
+        product: { t: 'ref', l: '父项物料', ref: 'products', key: 'code', name: 'name' },
+        product_name: { t: 'text', l: '父项名称', hide: true },
+        version: { t: 'text', l: '版本' },
+        mrp_src: { t: 'select', l: '供应方式', opts: MRP_SRC, badge: 1 },
+        warehouse: { t: 'ref', l: '投产仓库', ref: 'warehouses', key: 'code', hide: true },
+        base_qty: { t: 'int', l: '基数批量', hide: true, dec: 0 },
+        effect_from: { t: 'date', l: '生效日' },
+        effect_to: { t: 'date', l: '失效日', hide: true },
+        lines_cnt: { t: 'int', l: '子件数', ro: 1, dec: 0 },
+        levels: { t: 'int', l: '最大层级', ro: 1, hide: true, dec: 0 },
+        mat_cost: { t: 'money', l: '单件材料成本', ro: 1 },
+        owner: { t: 'text', l: '工程/计划员', hide: true },
+        status: { t: 'select', l: '状态', opts: { draft: 1, pending: 1, approved: 1, rejected: 1, obsolete: 1 }, badge: 1, ro: 1 },
+        ap: { t: 'ref', l: '审批单', ref: 'approval', key: 'no', hide: true },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    bom_lines: {
+      label: 'BOM 子件行', hidden: true, parent: 'bom',
+      fields: {
+        doc: { t: 'text' }, lineno: { t: 'int' },
+        product: { t: 'ref', l: '子件编码', ref: 'products', key: 'code' },
+        product_name: { t: 'text', l: '子件名称' },
+        uom: { t: 'text', l: '单位', hide: true },
+        qty: { t: 'money', l: '单件用量' },
+        loss_rate: { t: 'percent', l: '损耗率' },
+        cost: { t: 'money', l: '子件标准成本', ro: 1, hide: true },
+        amount: { t: 'money', l: '单件耗用', ro: 1 },
+        key_part: { t: 'select', l: '关键件', opts: YESNO, badge: 1 },
+        substitute: { t: 'ref', l: '替代料', ref: 'products', key: 'code', hide: true },
+        position: { t: 'text', l: '位号/工位', hide: true },
+        memo: { t: 'text', l: '备注', hide: true },
+      }
+    },
+    /* MRP 运算:需求 → BOM 逐级展开 → 扣可用量 → 净需求 → 建议单 */
+    mrp_run: {
+      label: 'MRP 计划运算', table: '计划运算 (mrp_run)', pk: 'no', prefix: 'MR', icon: 'zap', doc: 'mrp_lines',
+      statusField: 'status', nextSeqField: 'date',
+      fields: {
+        no: { t: 'code', l: '运算单号' },
+        name: { t: 'text', l: '运算主题' },
+        date: { t: 'date', l: '运算日期' },
+        source: { t: 'select', l: '需求来源', opts: MRP_DEMAND, badge: 1 },
+        horizon: { t: 'int', l: '计划周期(天)', dec: 0 },
+        warehouse: { t: 'ref', l: '库存口径仓', ref: 'warehouses', key: 'code', hide: true },
+        levels: { t: 'int', l: '展开层数', ro: 1, dec: 0 },
+        demand_cnt: { t: 'int', l: '需求父项', ro: 1, hide: true, dec: 0 },
+        rows_cnt: { t: 'int', l: '建议行', ro: 1, dec: 0 },
+        shortage_cnt: { t: 'int', l: '缺料行', ro: 1, dec: 0 },
+        amount: { t: 'money', l: '建议金额', sum: true, ro: 1 },
+        planner: { t: 'text', l: '计划员', hide: true },
+        status: { t: 'select', l: '状态', opts: { computed: 1, dispatched: 1, closed: 1 }, badge: 1, ro: 1 },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    mrp_lines: {
+      label: 'MRP 建议行', hidden: true, parent: 'mrp_run',
+      fields: {
+        doc: { t: 'text' }, lineno: { t: 'int' }, level: { t: 'int', l: '层级', dec: 0 },
+        product: { t: 'ref', l: '物料编码', ref: 'products', key: 'code' },
+        product_name: { t: 'text', l: '物料名称' },
+        mrp_src: { t: 'select', l: '供应方式', opts: MRP_SRC, badge: 1 },
+        parents: { t: 'text', l: '需求来源', hide: true },
+        gross_qty: { t: 'int', l: '毛需求', dec: 0 },
+        on_hand: { t: 'int', l: '现有库存', dec: 0 },
+        reserved: { t: 'int', l: '订单占用', dec: 0 },
+        on_order: { t: 'int', l: '在途/在制', dec: 0 },
+        safety_qty: { t: 'int', l: '安全库存', dec: 0 },
+        net_qty: { t: 'int', l: '净需求', dec: 0 },
+        moq: { t: 'int', l: '最小起订', hide: true, dec: 0 },
+        lead_time: { t: 'int', l: '提前期(天)', hide: true, dec: 0 },
+        suggest_qty: { t: 'int', l: '建议下单', dec: 0 },
+        suggest_type: { t: 'select', l: '建议单', opts: MRP_SUGGEST, badge: 1 },
+        need_date: { t: 'date', l: '需求日期' },
+        price: { t: 'money', l: '参考单价' },
+        amount: { t: 'money', l: '建议金额', sum: true },
+        bom_no: { t: 'ref', l: 'BOM', ref: 'bom', key: 'no', hide: true },
+        release: { t: 'text', l: '下达单据', hide: true },
+        memo: { t: 'text', l: '备注', hide: true },
       }
     },
     suppliers: {
@@ -126,6 +287,7 @@ window.SCHEMA = (function () {
         currency: { t: 'select', l: '结算币种', opts: CURRENCY, hide: true },
         min_order: { t: 'int', l: '最小起订量', hide: true },
         rating: { t: 'int', l: '绩效评分', hide: true },
+        qc_policy: { t: 'select', l: '来料质检', opts: QC_POLICY, hide: true },
         status: { t: 'select', l: '状态', opts: { enabled: 1, disabled: 1 }, badge: 1 },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
       }
@@ -135,6 +297,7 @@ window.SCHEMA = (function () {
       fields: {
         code: { t: 'code', l: '仓库编码', ph: 'WH-' },
         name: { t: 'text', l: '仓库名称' },
+        kind: { t: 'select', l: '仓库类型', opts: WH_KIND, badge: 1 },
         location: { t: 'text', l: '所在地' },
         manager: { t: 'text', l: '负责人' },
         phone: { t: 'tel', l: '联系电话', hide: true },
@@ -175,9 +338,60 @@ window.SCHEMA = (function () {
         qty: { t: 'int', l: '数量(±)' },
         unit_cost: { t: 'money', l: '单位成本', hide: true },
         amount: { t: 'money', l: '金额', sum: true },
+        lot: { t: 'code', l: '批次' },
+        bin: { t: 'ref', l: '库位', ref: 'bins', key: 'code', hide: true },
         ref: { t: 'text', l: '关联单据' },
         user: { t: 'text', l: '操作人', hide: true },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    bins: {
+      label: '库位 / 货位', table: '库位主档 (md_bin)', pk: 'code', icon: 'grid',
+      fields: {
+        code: { t: 'code', l: '库位编码' },
+        warehouse: { t: 'ref', l: '所属仓库', ref: 'warehouses', key: 'code' },
+        zone: { t: 'select', l: '库区', opts: ZONES, badge: 1 },
+        capacity: { t: 'int', l: '标准容量(件)' },
+        manager: { t: 'text', l: '责任人', hide: true },
+        status: { t: 'select', l: '状态', opts: { enabled: 1, disabled: 1 }, badge: 1 },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    lot: {
+      label: '批次台账', table: '批次档案 (inv_lot)', pk: 'no', prefix: 'LOT', icon: 'layers', readonly: true,
+      statusField: 'status',
+      fields: {
+        no: { t: 'code', l: '批次号' },
+        parent: { t: 'code', l: '源批次', hide: true },
+        product: { t: 'ref', l: '物料编码', ref: 'products', key: 'code' },
+        product_name: { t: 'text', l: '商品名称' },
+        warehouse: { t: 'ref', l: '当前仓库', ref: 'warehouses', key: 'code' },
+        bin: { t: 'ref', l: '库位', ref: 'bins', key: 'code' },
+        source: { t: 'select', l: '批次来源', opts: LOT_SOURCE, hide: true },
+        receipt: { t: 'text', l: '来源单据' },
+        supplier: { t: 'ref', l: '来源供应商', ref: 'suppliers', key: 'code' },
+        supplier_name: { t: 'text', l: '供应商', hide: true },
+        sup_lot: { t: 'text', l: '供应商批号', hide: true },
+        iqc: { t: 'ref', l: '检验单', ref: 'iqc', key: 'no', hide: true },
+        receipt_date: { t: 'date', l: '入库日期' },
+        prod_date: { t: 'date', l: '生产日期', hide: true },
+        expire_date: { t: 'date', l: '到期日' },
+        qty_in: { t: 'int', l: '入库数量' },
+        qty: { t: 'int', l: '当前余量' },
+        unit_cost: { t: 'money', l: '批次入账成本' },
+        value: { t: 'money', l: '批次金额', sum: true },
+        age_days: { t: 'int', l: '库龄(天)', hide: true },
+        status: { t: 'select', l: '批次状态', opts: { normal: 1, frozen: 1, expired: 1, consumed: 1 }, badge: 1 },
+        hold_note: { t: 'text', l: '冻结事由', hide: true },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    lot_tx: {
+      label: '批次收发台账', hidden: true,
+      fields: {
+        doc: { t: 'text' }, lineno: { t: 'int' }, date: { t: 'date' }, mv: { t: 'text' }, type: { t: 'text' },
+        product: { t: 'text' }, warehouse: { t: 'text' }, bin: { t: 'text' }, qty: { t: 'int' },
+        ref: { t: 'text' }, user: { t: 'text' }, note: { t: 'text' },
       }
     },
     users: {
@@ -189,7 +403,7 @@ window.SCHEMA = (function () {
         dept: { t: 'select', l: '部门', opts: { '总经办': 1, '销售部': 1, '采购部': 1, '仓储物流部': 1, '财务部': 1, '信息技术部': 1, '产品部': 1, '品质部': 1 } },
         role: { t: 'select', l: '角色', opts: { '系统管理员': 1, '销售主管': 1, '销售代表': 1, '采购主管': 1, '采购员': 1, '仓库管理员': 1, '财务会计': 1, '财务经理': 1, '产品经理': 1, '品质经理': 1 } },
         email: { t: 'email', l: '邮箱' },
-        pwd: { t: 'text', l: '登录口令', hide: true, ph: '留空则沿用原口令' },
+        pwd: { t: 'text', l: '登录口令', hide: true, secret: true, ph: '留空则沿用原口令' },
         phone: { t: 'tel', l: '手机号', hide: true },
         last_login: { t: 'text', l: '最近登录', hide: true },
         status: { t: 'select', l: '状态', opts: { active: 1, inactive: 1 }, badge: 1 },
@@ -227,12 +441,16 @@ window.SCHEMA = (function () {
         salesperson: { t: 'text', l: '销售员', hide: true },
         status: { t: 'select', l: '状态', opts: { draft: 1, confirmed: 1, partial: 1, done: 1, cancelled: 1, closed: 1 }, badge: 1, ro: 1 },
         total: { t: 'money', l: '订单金额(含税)', sum: true, ro: 1 },
+        credit_ap: { t: 'ref', l: '信用特批单', ref: 'approval', key: 'no', hide: true },
+        price_ap: { t: 'ref', l: '改价审批单', ref: 'approval', key: 'no', hide: true },
+        price_note: { t: 'text', l: '取价说明', hide: true, full: 1 },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
       }
     },
     so_lines: {
       label: '销售订单行', hidden: true, parent: 'sales_order',
-      fields: { doc: { t: 'text' }, lineno: { t: 'int' }, product: { t: 'ref', ref: 'products' }, product_name: { t: 'text' }, qty: { t: 'int' }, delivered: { t: 'int' }, price: { t: 'money' }, discount: { t: 'percent' }, amount: { t: 'money' }, tax_rate: { t: 'int' } }
+      fields: { doc: { t: 'text' }, lineno: { t: 'int' }, product: { t: 'ref', ref: 'products' }, product_name: { t: 'text' }, qty: { t: 'int' }, delivered: { t: 'int' }, price: { t: 'money' }, discount: { t: 'percent' }, amount: { t: 'money' }, tax_rate: { t: 'int' },
+        cost: { t: 'money' }, list_no: { t: 'text' }, price_src: { t: 'text' } }
     },
     pr_lines: {
       label: '采购申请行', hidden: true, parent: 'purchase_req',
@@ -352,11 +570,46 @@ window.SCHEMA = (function () {
         supplier_name: { t: 'text', l: '供应商名称' },
         warehouse: { t: 'ref', l: '收货仓', ref: 'warehouses', key: 'code' },
         amount: { t: 'money', l: '入库金额(暂估成本)', sum: true },
-        status: { t: 'select', l: '暂估状态', opts: { posted: 1, settled: 1 }, badge: 1 },
+        sup_lot: { t: 'text', l: '供应商批号 / 送货单号', hide: true },
+        status: { t: 'select', l: '暂估状态', opts: { posted: 1, settled: 1, returned: 1 }, badge: 1 },
+        iqc: { t: 'ref', l: '来料检验单', ref: 'iqc', key: 'no' },
         bill: { t: 'ref', l: '清算账单', ref: 'bill', key: 'no' },
         user: { t: 'text', l: '仓管员', hide: true },
         note: { t: 'textarea', l: '备注', hide: true, full: 1 },
       }
+    },
+    iqc: {
+      label: '来料检验单', table: '来料检验单 (pm_iqc)', pk: 'no', prefix: 'IQC', icon: 'shield',
+      fields: {
+        no: { t: 'code', l: '检验单号' },
+        date: { t: 'date', l: '报检日期' },
+        gr: { t: 'ref', l: '来源收货单', ref: 'gr', key: 'no' },
+        po: { t: 'ref', l: '来源采购订单', ref: 'purchase_order', key: 'no', hide: true },
+        supplier: { t: 'ref', l: '供应商', ref: 'suppliers', key: 'code' },
+        supplier_name: { t: 'text', l: '供应商名称' },
+        warehouse: { t: 'ref', l: '待检仓', ref: 'warehouses', key: 'code', hide: true },
+        target_wh: { t: 'ref', l: '放行仓', ref: 'warehouses', key: 'code' },
+        qty_in: { t: 'int', l: '到货数量' },
+        sample_qty: { t: 'int', l: '抽检数量' },
+        defect_qty: { t: 'int', l: '不合格数' },
+        acc_qty: { t: 'int', l: '允收数(Ac)', hide: true },
+        amount: { t: 'money', l: '批次金额(不含税)', sum: true },
+        status: { t: 'select', l: '检验判定', opts: { to_check: 1, pass: 1, concession: 1, reject: 1 }, badge: 1 },
+        discount: { t: 'percent', l: '让步折价率', hide: true },
+        claim: { t: 'money', l: '索赔 / 扣款', sum: true },
+        penalty: { t: 'int', l: '质量扣分', hide: true },
+        inspector: { t: 'text', l: '质检员' },
+        judged_at: { t: 'text', l: '判定时间', hide: true },
+        standard: { t: 'text', l: '检验标准', hide: true },
+        opinion: { t: 'textarea', l: '检验结论', hide: true, full: 1 },
+        note: { t: 'textarea', l: '备注', hide: true, full: 1 },
+      }
+    },
+    iqc_lines: {
+      label: '来料检验行', hidden: true, parent: 'iqc',
+      fields: { doc: { t: 'text' }, lineno: { t: 'int' }, product: { t: 'ref', ref: 'products' }, product_name: { t: 'text' },
+        qty: { t: 'int' }, price: { t: 'money' }, amount: { t: 'money' }, sample: { t: 'int' }, acc: { t: 'int' },
+        defect: { t: 'int' }, defect_code: { t: 'text' }, verdict: { t: 'text' } }
     },
     bill: {
       label: '采购发票(应付)', table: '应付账单 (ap_bill)', pk: 'no', prefix: 'PB', icon: 'receipt', readonly: true,
@@ -569,8 +822,8 @@ window.SCHEMA = (function () {
         date: { t: 'date', l: '提交日期' },
         module: { t: 'select', l: '审批类型', opts: {
           product_release: '新品发布', supplier_apply: '供应商准入', processor_audit: '外协商审核',
-          purchase_req: '采购申请', so_change: '销售订单变更', price_change: '价格调整',
-          rma: '售后处理', os_order: '委外加工', stock_adjust: '库存调整'
+          purchase_req: '采购申请', so_change: '销售订单变更', price_change: '价格调整', price_list: '价格策略核准',
+          bom: '物料清单变更', rma: '售后处理', os_order: '委外加工', stock_adjust: '库存调整', credit: '信用超额特批'
         } },
         biz: { t: 'text', l: '业务单据' },
         title: { t: 'text', l: '审批事由', full: 1 },
@@ -762,21 +1015,26 @@ window.SCHEMA = (function () {
   const PERM_MODULES = [
     { key: 'dashboard', label: '经营看板', entity: 'dashboard' },
     { key: 'products', label: '商品管理', entity: 'products' },
+    { key: 'bom', label: '物料清单 BOM', entity: 'bom' },
     { key: 'product_release', label: '新品发布', entity: 'product_release' },
     { key: 'rfq', label: '询价比价', entity: 'rfq' },
     { key: 'customers', label: '客户档案', entity: 'customers' },
+    { key: 'price_list', label: '价目表与价格策略', entity: 'price_list' },
     { key: 'sales_order', label: '销售订单', entity: 'sales_order' },
     { key: 'invoice', label: '发票应收', entity: 'invoice' },
     { key: 'receipt', label: '收款单', entity: 'receipt' },
     { key: 'supplier_apply', label: '供应商准入', entity: 'supplier_apply' },
     { key: 'purchase_order', label: '采购订单', entity: 'purchase_order' },
+    { key: 'iqc', label: '来料质检', entity: 'iqc' },
     { key: 'purchase_req', label: '采购申请', entity: 'purchase_req' },
     { key: 'bill', label: '应付账单', entity: 'bill' },
     { key: 'payment', label: '付款单', entity: 'payment' },
     { key: 'processors', label: '服务商档案', entity: 'processors' },
     { key: 'processor_audit', label: '外协商审核', entity: 'processor_audit' },
     { key: 'os_order', label: '委外加工', entity: 'os_order' },
+    { key: 'mrp_run', label: 'MRP 计划运算', entity: 'mrp_run' },
     { key: 'stock', label: '库存管理', entity: 'stock' },
+    { key: 'lot', label: '批次与库位', entity: 'lot' },
     { key: 'rma', label: '售后管理', entity: 'rma' },
     { key: 'journal', label: '财务凭证', entity: 'journal' },
     { key: 'period', label: '期末结账', entity: 'period' },
@@ -785,9 +1043,21 @@ window.SCHEMA = (function () {
     { key: 'activity', label: '操作日志', entity: 'activity' },
   ];
 
+  /* 审批类型 → 裁决权所属的权限模块(审批中心与单据抽屉共用) */
+  const APPROVAL_PERM = { so_change: 'sales_order', price_change: 'sales_order', price_list: 'price_list', bom: 'bom', stock_adjust: 'stock', credit: 'invoice' };
+
+  /* 金额分级会签:资金承诺类审批按金额逐级加签,达到档位就在基线岗位后追加签批岗 */
+  const SIGN_TIERS = [{ min: 30000, role: '财务经理', why: '资金影响需财务复核' },
+    { min: 120000, role: '系统管理员', why: '大额事项需总经办签批' }];
+  const SIGN_MODULES = ['so_change', 'price_change', 'price_list', 'bom', 'purchase_req', 'os_order', 'stock_adjust', 'credit'];
+  /* 签批时限(自然日):紧急度越高,单节点停留越短 */
+  const SIGN_DUE = { std: 3, urgent: 2, critical: 1 };
+
   return {
     entities: E,
-    STATUS, PAYTERM, CURRENCY, PERM_MODULES,
+    STATUS, PAYTERM, CURRENCY, PERM_MODULES, APPROVAL_PERM, SIGN_TIERS, SIGN_MODULES, SIGN_DUE,
+    QC_WH, WH_KIND, QC_POLICY, AQL_PLAN, ZONES, ISSUE_RULES, LOT_SOURCE, WH_SHORT,
+    MRP_SRC, MRP_SUGGEST, MRP_DEMAND,
     visible() {
       return Object.keys(E).filter(k => !E[k].hidden);
     },

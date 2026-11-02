@@ -51,6 +51,7 @@ window.UI = (function () {
     lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><path d="M12 15v3"/>',
     unlock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
     zap: '<path d="M13 2 4.5 13.5H11l-1 8.5 8.5-11.5H12l1-8.5z"/>',
+    shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 11.5 2 2 4-4"/>',
   };
   function icon(name, cls) {
     /* 默认 16px:内联 SVG 无宽高属性时浏览器会按 300x150 固有尺寸渲染,撑爆容器 */
@@ -147,7 +148,7 @@ window.UI = (function () {
     el.addEventListener('click', e => {
       if (e.target === el || e.target.closest('[data-close]')) return api.close();
       const b = e.target.closest('[data-act]');
-      if (b && !b.disabled) { const a = o.actions[+b.dataset.act]; if (a.onClick(api) !== false) api.close(); }
+      if (b && !b.disabled) { const a = o.actions[+b.dataset.act]; if (!a.onClick || a.onClick(api) !== false) api.close(); }
     });
     setTimeout(() => { const f = $('input:not([readonly]),select,textarea', el); f && f.focus(); }, 80);
     return api;
