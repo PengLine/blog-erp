@@ -86,7 +86,10 @@
     ] },
   ];
 
-  const state = { route: 'dashboard', collapsed: false };
+  const state = { route: 'dashboard', collapsed: false, period: 30 };
+  let navRoute = '';            // 上一次侧栏渲染的路由,用来区分「重绘」与「跳转」两种滚动场景
+  /* 顶栏统计区间:高亮必须由 state 反推,否则每次重绘都会退回近 30 天 */
+  const PERIODS = [{ d: 30, label: '近 30 天' }, { d: 90, label: '近 90 天' }, { d: 180, label: '半年' }];
 
   /* 路由 → 权限模块(导航按角色可见性过滤) */
   const PERM_ROUTE = { orders: 'sales_order', approvals: '', perms: 'role', users: 'role', gl_account: 'journal', approval: 'product_release',
@@ -183,6 +186,13 @@
   function paintNav() {
     const ent = entityOf(state.route);
     const pendAp = DB.where('approval', a => a.status === 'pending').length;
+    /* 待办角标与待办页合计同源:按事项数,不是分类数;订单中心角标 = 执行中订单数 */
+    const todoCnt = DASH.todoStats().tasks;
+    const ordCnt = { approvals: pendAp, todo: todoCnt, orders: FLOW.ordersStats().open.length };
+    /* 整栏 innerHTML 重绘会把 .nav 的滚动位置打回顶部:同一路由内的重绘(切时间范围、动作后刷新)
+       沿用原位置,只有跨路由跳转才把选中项滚进视野,避免每次点菜单都从头开始 */
+    const oldNav = document.querySelector('#sidebar .nav');
+    const keepTop = oldNav && state.route === navRoute ? oldNav.scrollTop : null;
     document.getElementById('sidebar').innerHTML = `
       <div class="logo">${logoSVG()}<div class="logo-text"><b>Sailfish ERP</b><i>Enterprise Resource Planning</i></div></div>
       <nav class="nav">${NAV.map(g => {
@@ -193,7 +203,7 @@
           const route = routeOf(it);
           const isEnt = SCHEMA.entities[route];
           const active = state.route === route || (isEnt && ent === route);
-          const cnt = isEnt ? countBadge(route) : (route === 'approvals' ? pendAp : null);
+          const cnt = isEnt ? countBadge(route) : (ordCnt[route] || null);
           return `<div class="nav-item ${active ? 'active' : ''}" data-route="${route}" title="${it.label}">${UI.icon(it.icon)}<span class="nav-label">${it.label}</span>${cnt ? `<span class="cnt">${cnt}</span>` : ''}</div>`;
         }).join('')}`;
       }).join('')}
@@ -201,6 +211,19 @@
       <div class="side-foot">${UI.icon('database')}
         <div class="side-user-name">${esc(DB.all().meta.company.slice(0, 6))}…<span>账套 2026 · 本地存储</span></div></div>`;
     UI.$$('#sidebar [data-route]').forEach(el => el.addEventListener('click', () => go(el.dataset.route)));
+    locateNav(keepTop);
+    navRoute = state.route;
+  }
+  /* 只滚 .nav 自身,不用 scrollIntoView,免得连带把外层容器一起滚走 */
+  function locateNav(keepTop) {
+    const nav = UI.$('#sidebar .nav');
+    if (!nav) return;
+    if (keepTop != null) { nav.scrollTop = keepTop; return; }
+    const active = UI.$('#sidebar .nav-item.active');
+    if (!active) return;
+    const a = active.getBoundingClientRect(), n = nav.getBoundingClientRect();
+    /* 已在视野内就不动,只在被顶出/沉底时把选中项居中,避免点击后菜单乱跳 */
+    if (a.top < n.top || a.bottom > n.bottom) nav.scrollTop += (a.top - n.top) - (nav.clientHeight - a.height) / 2;
   }
   function routeOf(it) { return it.id.indexOf('/') > 0 ? 'reports/' + it.id.split('/')[1] : it.id; }
   function countBadge(route) {
@@ -217,7 +240,7 @@
   function esc(s) { return UI.esc(s); }
 
   function paintTopbar(title) {
-    const alerts = alertCount();
+    const td = DASH.todoStats();
     const crumb = NAV.reduce((acc, g) => {
       const it = g.items.find(i => routeOf(i) === state.route);
       return it ? `<span class="crumb">${g.group} / <b>${it.label}</b></span>` : acc;
@@ -227,8 +250,8 @@
     document.getElementById('topbar').innerHTML = `${crumb}
       <div class="topbar-right">
         <div class="searchbox" data-cmdk>${UI.icon('search')}<span>搜索单据、客户、商品…</span><kbd>Ctrl K</kbd></div>
-        <div class="btn-group" data-period><button data-p="30" class="on">近 30 天</button><button data-p="90">近 90 天</button><button data-p="180">半年</button></div>
-        <button class="icon-btn" data-alerts title="待办与预警">${UI.icon('bell')}${alerts ? `<span class="dot"></span>` : ''}</button>
+        <div class="btn-group" data-period">${PERIODS.map(p => `<button data-p="${p.d}" class="${state.period === p.d ? 'on' : ''}">${p.label}</button>`).join('')}</div>
+        <button class="icon-btn" data-alerts title="待办与预警:共 ${td.tasks} 项待办,分布在 ${td.groups} 个业务环节">${UI.icon('bell')}${td.tasks ? `<span class="cnt">${td.tasks > 99 ? '99+' : td.tasks}</span>` : ''}</button>
         <button class="icon-btn" data-refresh title="刷新数据">${UI.icon('refresh')}</button>
         <div class="flex" style="gap:9px;padding-left:6px;border-left:1px solid var(--border);cursor:pointer" data-user>
           <div class="avatar">${esc(initials(DB.currentUser()))}</div>
@@ -245,16 +268,6 @@
     }));
   }
   function initials(n) { return n ? n.slice(0, 2) : 'ER'; }
-  function alertCount() {
-    return DB.where('approval', a => a.status === 'pending').length +
-      DB.where('sales_order', o => o.status === 'confirmed').length +
-      DB.where('purchase_req', p => p.status === 'pending').length +
-      DB.where('invoice', i => i.status === 'overdue').length +
-      DB.where('stock', s => s.status !== 'normal').length +
-      DB.where('rfq', r => r.status === 'sent').length +
-      DB.where('os_order', o => o.status === 'issued').length +
-      DB.where('rma', r => ['pending', 'approved', 'received'].indexOf(r.status) >= 0).length;
-  }
 
   function bindCommon() {
     UI.$$('#view [data-open]').forEach(el => el.addEventListener('click', ev => {

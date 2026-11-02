@@ -73,6 +73,7 @@ button{font-family:inherit}
 .icon-btn svg{width:17px;height:17px}
 .icon-btn:hover{background:var(--surface-2);color:var(--text)}
 .icon-btn .dot{position:absolute;top:6px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--danger);border:2px solid var(--surface)}
+.icon-btn .cnt{position:absolute;top:-5px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:999px;background:var(--danger);color:#fff;border:2px solid var(--surface);font-size:10px;line-height:13px;font-weight:650;font-variant-numeric:tabular-nums}
 
 /* ============ Primitives ============ */
 .page-head{display:flex;align-items:flex-start;gap:16px;margin-bottom:18px;flex-wrap:wrap}

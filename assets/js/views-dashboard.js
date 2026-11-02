@@ -89,6 +89,7 @@ window.DASH = (function () {
     /* 待办卡片:清单按业务动线排列,卡片只放最要紧的 8 项,因此按紧急度重排而不是按声明顺序截断 */
     const TODORANK = { 'b-danger': 0, 'b-warning': 1, 'b-primary': 2, 'b-purple': 3, 'b-info': 4, 'b-success': 5, 'b-neutral': 6 };
     const todos = todoItems();
+    const todoTasks = todos.reduce((s, t) => s + t.count, 0);
     const todoHTML = todos.slice().sort((a, b) => (TODORANK[a.cls] - TODORANK[b.cls]) || (b.count - a.count)).slice(0, 8)
       .map(t => `<div class="flex" style="padding:11px 0;border-bottom:1px solid #EEF1F6">
       <span class="badge ${t.cls}">${t.count}</span><div class="grow"><div style="font-weight:550">${esc(t.label)}</div>
@@ -137,7 +138,7 @@ window.DASH = (function () {
       <div class="card"><div class="card-head"><h3>${icon('clock')}实时业务动态</h3></div><div class="card-body">${actHTML}</div></div>
     </div>
     <div class="grid g2 mt16">
-      <div class="card"><div class="card-head"><h3>${icon('clipboard')}我的待办</h3><div class="right"><button class="btn sm" data-route="todo">全部 ${todos.length} 项</button></div></div><div class="card-body">${todoHTML}</div></div>
+      <div class="card"><div class="card-head"><h3>${icon('clipboard')}我的待办</h3><div class="right"><span class="badge b-danger" title="${todos.length} 类事项合计 ${todoTasks} 项,卡片仅列最紧急的 8 类">${todoTasks} 项待处理</span><button class="btn sm" data-route="todo">全部 ${todos.length} 类</button></div></div><div class="card-body">${todoHTML}</div></div>
       <div class="card"><div class="card-head"><h3>${icon('layers')}模块数据量</h3></div><div class="card-body">
         <div class="grid g3">${Object.entries({ 商品: 'products', 客户: 'customers', 供应商: 'suppliers', 销售订单: 'sales_order', 'PO': 'purchase_order', 库存行: 'stock', 流水: 'stock_movements', 凭证: 'journal', 询价单: 'rfq', 委外加工: 'os_order', 售后工单: 'rma', 审批单: 'approval', 日志: 'activity' })
           .map(([l, k]) => `<div style="padding:10px;border:1px solid var(--border);border-radius:10px;cursor:pointer" data-route="${k}">
@@ -237,6 +238,12 @@ window.DASH = (function () {
     return out;
   }
 
+  /* 待办计数统一口径:侧栏角标与顶栏铃铛取「事项数」而不是分类数,和待办页的合计同源 */
+  function todoStats() {
+    const items = todoItems();
+    return { groups: items.length, tasks: items.reduce((s, t) => s + t.count, 0) };
+  }
+
   function todo() {
     const items = todoItems();
     const total = items.reduce((s, i) => s + i.count, 0);
@@ -290,5 +297,5 @@ window.DASH = (function () {
     }));
   }
 
-  return { board, todo, bind: { todo, dashboard: () => { } }, todoItems, arAging, monthKeys, revenueByMonth, inPeriod, since };
+  return { board, todo, bind: { todo, dashboard: () => { } }, todoItems, todoStats, arAging, monthKeys, revenueByMonth, inPeriod, since };
 })();

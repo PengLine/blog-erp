@@ -262,13 +262,34 @@ window.FLOW = (function () {
     return { lines: lines.length, qty, ship, billed, paid, total: so.total || 0 };
   }
 
-  function orders() {
-    const today = DB.today(), s = st.ord;
+  /* 订单中心口径:页面 KPI、筛选计数、侧栏角标共用一份,三处各自数一遍迟早对不上 */
+  function ordersStats() {
+    const today = DB.today();
     const all = DB.list('sales_order');
+    const running = all.filter(o => ['draft', 'confirmed', 'partial'].indexOf(o.status) >= 0);
+    const due = running.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0 && o.required_date);
+    const billedSo = {};
+    DB.list('invoice').forEach(i => { if (i.so) billedSo[i.so] = 1; });
+    return {
+      today, all,
+      open: running,
+      openAmount: running.reduce((a, o) => a + (o.total || 0), 0),
+      late: due.filter(o => o.required_date < today),
+      week: due.filter(o => o.required_date >= today && UI.days(today, o.required_date) <= 7),
+      unbilled: all.filter(o => ['done', 'partial'].indexOf(o.status) >= 0 && !billedSo[o.no]),
+      pendChange: DB.where('approval', a => a.module === 'so_change' && a.status === 'pending'),
+      shortQty: running.reduce((a, o) => { const p = soProgress(o); return a + Math.max(0, p.qty - p.ship); }, 0),
+    };
+  }
+
+  function orders() {
+    const st0 = ordersStats(), today = st0.today, s = st.ord;
+    const all = st0.all;
     let rows = all.slice();
-    if (s.bucket === 'open') rows = rows.filter(o => ['draft', 'confirmed', 'partial'].indexOf(o.status) >= 0);
-    else if (s.bucket === 'late') rows = rows.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0 && o.required_date && o.required_date < today);
-    else if (s.bucket === 'unbilled') rows = rows.filter(o => ['done', 'partial'].indexOf(o.status) >= 0 && !DB.where('invoice', i => i.so === o.no).length);
+    /* 分桶直接取 ordersStats 的同一批对象,角标数字与点开以后的列表必然一致 */
+    if (s.bucket === 'open') rows = st0.open.slice();
+    else if (s.bucket === 'late') rows = st0.late.slice();
+    else if (s.bucket === 'unbilled') rows = st0.unbilled.slice();
     if (s.status) rows = rows.filter(o => o.status === s.status);
     if (s.q) {
       const q = s.q.toLowerCase();
@@ -276,15 +297,12 @@ window.FLOW = (function () {
     }
     rows = sortBy(rows, s.sort, s.asc);
 
-    const openSo = all.filter(o => ['draft', 'confirmed', 'partial'].indexOf(o.status) >= 0);
-    const late = all.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0 && o.required_date && o.required_date < today);
-    const week = all.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0 && o.required_date && o.required_date >= today && UI.days(today, o.required_date) <= 7);
-    const pendChange = DB.where('approval', a => a.module === 'so_change' && a.status === 'pending');
+    const openSo = st0.open, late = st0.late, week = st0.week, pendChange = st0.pendChange;
     const statusCount = {};
     all.forEach(o => statusCount[o.status] = (statusCount[o.status] || 0) + 1);
     const CO = SCHEMA.entities.sales_order.fields.channel.opts;
     const chan = Object.keys(CO).map((k, i) => ({ name: CO[k], value: r2(all.filter(o => (o.channel || 'offline') === k).reduce((a, o) => a + (o.total || 0), 0)), color: UI.PAL[i % UI.PAL.length] })).filter(x => x.value > 0);
-    const shortQty = openSo.reduce((a, o) => { const p = soProgress(o); return a + Math.max(0, p.qty - p.ship); }, 0);
+    const shortQty = st0.shortQty;
 
     return `
     <div class="page-head">
@@ -296,13 +314,13 @@ window.FLOW = (function () {
       </div>
     </div>
     <div class="grid g4">
-      ${UI.kpi({ label: '执行中订单', value: num(openSo.length), unit: ' 单', icon: 'file', foot: '在手金额 ¥' + UI.compact(openSo.reduce((a, o) => a + (o.total || 0), 0)) })}
+      ${UI.kpi({ label: '执行中订单', value: num(openSo.length), unit: ' 单', icon: 'file', foot: '在手金额 ¥' + UI.compact(st0.openAmount) })}
       ${UI.kpi({ label: '交期已逾期', value: num(late.length), unit: ' 单', icon: 'warn', color: '#EF4444', foot: '未交数量 ' + num(shortQty) + ' 件' })}
       ${UI.kpi({ label: '7 天内到期', value: num(week.length), unit: ' 单', icon: 'calendar', color: '#F59E0B', foot: '建议今日生成拣货单' })}
       ${UI.kpi({ label: '变更待审批', value: num(pendChange.length), unit: ' 单', icon: 'edit', color: '#8B5CF6', foot: '批准后自动写回订单' })}
     </div>
     <div class="card mt16">
-      <div class="card-head"><h3>${icon('truck')}交期与履约</h3><div class="right">${UI.chips([{ v: 'open', l: '执行中' }, { v: 'late', l: '逾期' }, { v: 'unbilled', l: '完工未开票' }, { v: 'all', l: '全部' }], s.bucket)}</div></div>
+      <div class="card-head"><h3>${icon('truck')}交期与履约</h3><div class="right">${UI.chips([{ v: 'open', l: '执行中' }, { v: 'late', l: '逾期' }, { v: 'unbilled', l: '完工未开票' }, { v: 'all', l: '全部' }], s.bucket, { open: openSo.length, late: late.length, unbilled: st0.unbilled.length, all: all.length })}</div></div>
       <div class="toolbar">
         ${UI.toolbarSearch(s.q)}
         <div class="field-inline">状态<select data-ord-status style="width:auto;min-width:126px"><option value="">全部状态</option>
@@ -578,7 +596,7 @@ window.FLOW = (function () {
   }
 
   return {
-    approvals, orders, perms, permsFor,
+    approvals, orders, perms, permsFor, ordersStats,
     bind: { approvals: () => bind('approvals'), orders: () => bind('orders'), perms: () => bind('perms') },
     routes: ['approvals', 'orders', 'perms'],
     titles: { approvals: '审批中心', orders: '订单中心', perms: '权限矩阵' },
