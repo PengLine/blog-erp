@@ -86,9 +86,11 @@ window.DASH = (function () {
     const topCust = Object.keys(custAgg).sort((a, b) => custAgg[b] - custAgg[a]).slice(0, 6)
       .map(c => ({ name: (DB.find('customers', c) || {}).name || c, value: r2(custAgg[c]), key: c }));
 
-    /* 待办卡片 */
+    /* 待办卡片:清单按业务动线排列,卡片只放最要紧的 8 项,因此按紧急度重排而不是按声明顺序截断 */
+    const TODORANK = { 'b-danger': 0, 'b-warning': 1, 'b-primary': 2, 'b-purple': 3, 'b-info': 4, 'b-success': 5, 'b-neutral': 6 };
     const todos = todoItems();
-    const todoHTML = todos.slice(0, 6).map(t => `<div class="flex" style="padding:11px 0;border-bottom:1px solid #EEF1F6">
+    const todoHTML = todos.slice().sort((a, b) => (TODORANK[a.cls] - TODORANK[b.cls]) || (b.count - a.count)).slice(0, 8)
+      .map(t => `<div class="flex" style="padding:11px 0;border-bottom:1px solid #EEF1F6">
       <span class="badge ${t.cls}">${t.count}</span><div class="grow"><div style="font-weight:550">${esc(t.label)}</div>
       <div class="muted small">${esc(t.desc)}</div></div><button class="btn sm" data-route="${t.route}">${esc(t.action)}</button></div>`).join('');
 

@@ -2038,6 +2038,37 @@ window.SEED = (function () {
     /* 供应方式基线:原料与在售单品一律外购,已建清单的父件按清单口径投产 */
     T.products.forEach(p => { if (!p.mrp_src) p.mrp_src = 'buy'; });
 
+    /* ---------- 订单驱动的投产需求 ----------
+     * 前面生成的未清订单全是外购单品,按「未履约销售订单」口径运算永远只有一层建议;
+     * 这里补两张已审核、未出库的渠道专供单,让 MRP 从成品逐层引爆到半成品与原料。
+     * 不取随机数、不落库存流水与凭证,账簿基线与上游单据保持可复现。 */
+    const planBuyers = (ka.length ? ka : T.customers.slice(0, 2));
+    const planCost = code => money((T.stock.find(s => s.product === code && s.warehouse === MAIN_WH) || {}).cost
+      || (T.products.find(p => p.code === code) || {}).cost || 0);
+    const planDemands = (kitSku ? [[kitSku, 1200, '渠道专供组套 双十一备货']] : [])
+      .concat(nkOf(0) ? [[nkOf(0), 260, '棉麻抱枕套 门店补货']] : []);
+    planDemands.forEach((d, i) => {
+      const c = planBuyers[i % planBuyers.length];
+      if (!c) return;
+      const no = docNo('SO', 'sales_order', today);
+      const p = d[0];
+      const lines = [push('so_lines', { doc: no, lineno: 1, product: p.code, product_name: p.name,
+        qty: d[1], delivered: 0, price: money(p.price), discount: 0, tax_rate: p.tax_rate || 13, cost: planCost(p.code),
+        list_no: '', price_src: '标准售价', memo: d[2] })];
+      push('sales_order', { no, date: today, customer: c.code, customer_name: c.name, warehouse: MAIN_WH,
+        required_date: addDays(today, 12 + i * 3), currency: 'CNY', payment_terms: c.payment_terms || 'NET30',
+        channel: 'b2b', priority: i === 0 ? 'urgent' : 'std', salesperson: c.salesperson || '林知远', status: 'confirmed',
+        total: docTotal(lines),
+        note: `${d[2]}:${p.name} 按「${SCHEMA.MRP_SRC[p.mrp_src] || p.mrp_src}」投产,审核即占用中心仓现量,缺口由 MRP 计划运算逐层给出建议。` });
+    });
+    /* 占用重放:与前面「已确认未出库订单占用量」同口径,保证可用量与新单一致 */
+    T.stock.forEach(s => {
+      const held = T.sales_order.filter(o => o.status === 'confirmed' && o.warehouse === s.warehouse)
+        .reduce((sum, o) => sum + T.so_lines.filter(l => l.doc === o.no && l.product === s.product).reduce((a, l) => a + (l.qty - (l.delivered || 0)), 0), 0);
+      s.reserved = Math.min(s.qty, held); s.available = s.qty - s.reserved;
+      s.status = s.qty <= 0 ? 'shortage' : (s.available < (T.products.find(p => p.code === s.product) || {}).safety_qty ? 'low' : s.status);
+    });
+
     /* ---------- 期初建账 + 存货成本差异结转 ---------- */
     const openStock = money(T.stock_movements.filter(m => m.ref === '期初建账').reduce((s, m) => s + m.amount, 0));
     const openCash = money(Math.max(6800000, openStock * 1.8));
