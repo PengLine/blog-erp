@@ -266,19 +266,25 @@ window.FLOW = (function () {
   function ordersStats() {
     const today = DB.today();
     const all = DB.list('sales_order');
-    const running = all.filter(o => ['draft', 'confirmed', 'partial'].indexOf(o.status) >= 0);
-    const due = running.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0 && o.required_date);
+    /* 「执行中」= 已审核且未收口的订单,与看板「未清销售订单」、MRP 需求取同一批对象。
+       草稿单不该进执行中,更不能算发货缺口——否则这里报的未交数量比 MRP 多出一堆不存在的量。 */
+    const running = all.filter(o => ['confirmed', 'partial'].indexOf(o.status) >= 0);
+    const drafts = all.filter(o => o.status === 'draft');
+    const due = running.filter(o => o.required_date);
     const billedSo = {};
     DB.list('invoice').forEach(i => { if (i.so) billedSo[i.so] = 1; });
+    const late = due.filter(o => o.required_date < today);
+    const week = due.filter(o => o.required_date >= today && UI.days(today, o.required_date) <= 7);
+    /* 未交数量:按发货通知量(p.ship)而非订单行 delivered,部分出库的单要能看出还差多少 */
+    const shortOf = list => list.reduce((a, o) => { const p = soProgress(o); return a + Math.max(0, p.qty - p.ship); }, 0);
     return {
-      today, all,
+      today, all, drafts,
       open: running,
       openAmount: running.reduce((a, o) => a + (o.total || 0), 0),
-      late: due.filter(o => o.required_date < today),
-      week: due.filter(o => o.required_date >= today && UI.days(today, o.required_date) <= 7),
+      late, week,
       unbilled: all.filter(o => ['done', 'partial'].indexOf(o.status) >= 0 && !billedSo[o.no]),
       pendChange: DB.where('approval', a => a.module === 'so_change' && a.status === 'pending'),
-      shortQty: running.reduce((a, o) => { const p = soProgress(o); return a + Math.max(0, p.qty - p.ship); }, 0),
+      shortQty: shortOf(running), lateShort: shortOf(late), weekShort: shortOf(week),
     };
   }
 
@@ -314,9 +320,9 @@ window.FLOW = (function () {
       </div>
     </div>
     <div class="grid g4">
-      ${UI.kpi({ label: '执行中订单', value: num(openSo.length), unit: ' 单', icon: 'file', foot: '在手金额 ¥' + UI.compact(st0.openAmount) })}
-      ${UI.kpi({ label: '交期已逾期', value: num(late.length), unit: ' 单', icon: 'warn', color: '#EF4444', foot: '未交数量 ' + num(shortQty) + ' 件' })}
-      ${UI.kpi({ label: '7 天内到期', value: num(week.length), unit: ' 单', icon: 'calendar', color: '#F59E0B', foot: '建议今日生成拣货单' })}
+      ${UI.kpi({ label: '执行中订单', value: num(openSo.length), unit: ' 单', icon: 'file', foot: `已审核未收口 · 在手金额 ¥${UI.compact(st0.openAmount)}${st0.drafts.length ? ` · 另有草稿 ${st0.drafts.length} 单未计入` : ''}` })}
+      ${UI.kpi({ label: '交期已逾期', value: num(late.length), unit: ' 单', icon: 'warn', color: '#EF4444', foot: `这 ${late.length} 单未交数量 ${num(st0.lateShort)} 件 · 全部执行中缺口 ${num(shortQty)} 件` })}
+      ${UI.kpi({ label: '7 天内到期', value: num(week.length), unit: ' 单', icon: 'calendar', color: '#F59E0B', foot: `未交 ${num(st0.weekShort)} 件 · 建议今日生成拣货单` })}
       ${UI.kpi({ label: '变更待审批', value: num(pendChange.length), unit: ' 单', icon: 'edit', color: '#8B5CF6', foot: '批准后自动写回订单' })}
     </div>
     <div class="card mt16">
@@ -328,7 +334,7 @@ window.FLOW = (function () {
         <button class="btn ghost sm" data-ord-clear style="margin-left:auto">${icon('refresh')}重置</button>
       </div>
       ${ordTable(rows, today)}
-      <div class="table-foot"><span>共 <b>${num(rows.length)}</b> 单 · 显示前 ${Math.min(30, rows.length)} 行</span></div>
+      <div class="table-foot"><span>共 <b>${num(rows.length)}</b> 单 · 本页显示前 ${Math.min(30, rows.length)} 行${rows.length > 30 ? ',红字逾期与缺口数量按全部 ' + num(rows.length) + ' 单统计,不只本页这 30 行' : ''}</span>${rows.length > 30 ? `<button class="btn sm ghost" data-route="sales_order">${icon('file')}到订单台账看全部</button>` : ''}</div>
     </div>
     <div class="grid g2 mt16">
       <div class="card"><div class="card-head"><h3>${icon('pie')}渠道销售构成</h3></div><div class="card-body">

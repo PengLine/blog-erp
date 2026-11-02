@@ -12,22 +12,55 @@ window.DASH = (function () {
     const out = [], d = new Date();
     for (let i = n - 1; i >= 0; i--) {
       const x = new Date(d.getFullYear(), d.getMonth() - i, 1);
-      out.push(x.toISOString().slice(0, 7));
+      /* 用本地年月拼接:toISOString 会按 UTC 截,东八区把整条序列往前挪一格,当月数据直接消失 */
+      out.push(x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0'));
     }
     return out;
   }
 
-  /* 收入口径:已开票销售发票(不含税);成本:出库结转成本 */
+  /* 经营趋势一律取总账发生额,与利润表同源:
+     收入 = 损益「收入类」科目贷方净额,成本 = 「成本类」科目借方净额。
+     以前用「发票价税合计 ÷ 1.13」反推、用出库凭证借方当成本:商品税率一改就失真,
+     红字发票冲减的收入、其他业务收入、售后退货冲回的成本全都进不去。 */
   function revenueByMonth(keys) {
     const rev = keys.map(() => 0), cogs = keys.map(() => 0), pur = keys.map(() => 0), cash = keys.map(() => 0);
-    DB.list('invoice').forEach(i => { const p = keys.indexOf(i.period || i.date.slice(0, 7)); if (p >= 0) rev[p] += (i.total || 0) / 1.13; });
+    const revAcc = {}, costAcc = {};
+    DB.list('gl_account').forEach(a => {
+      if (a.type === 'revenue') revAcc[a.code] = 1;
+      else if (a.type === 'cost') costAcc[a.code] = 1;
+    });
+    /* 结转凭证本身会把损益科目对冲掉,趋势必须排除它,否则 12 月会冒出一笔假的收入 */
+    const jPer = {}, jType = {};
     DB.list('journal').forEach(j => {
-      const k = j.period || j.date.slice(0, 7), p = keys.indexOf(k); if (p < 0) return;
-      if (j.type === 'sales_delivery') cogs[p] += j.debit;
-      if (j.type === 'ap_bill') pur[p] += j.debit;
-      if (j.type === 'sales_receipt') cash[p] += j.debit;
+      if (j.type === 'close') return;
+      jPer[j.no] = j.period || j.date.slice(0, 7);
+      jType[j.no] = j.type;
+    });
+    DB.list('journal_lines').forEach(l => {
+      const p = jPer[l.doc] === undefined ? -1 : keys.indexOf(jPer[l.doc]);
+      if (p < 0) return;
+      const d = l.debit || 0, c = l.credit || 0, t = jType[l.doc];
+      if (revAcc[l.account]) rev[p] += c - d;
+      else if (costAcc[l.account]) cogs[p] += d - c;
+      /* 采购入库只取收货暂估与票到清算两张凭证对存货的净影响,不含调拨/盘盈/委外发料 */
+      else if (l.account === '1405' && (t === 'gr_accrual' || t === 'ap_bill')) pur[p] += d - c;
+      /* 回款取销售收款凭证的银行借方;售后退款走 rma_refund,不会被算成回款 */
+      else if (l.account === '1002' && t === 'sales_receipt') cash[p] += d - c;
     });
     return { rev: rev.map(r2), cogs: cogs.map(r2), pur: pur.map(r2), cash: cash.map(r2) };
+  }
+
+  /* 回款窗口口径与趋势图同一张凭证来源,免得卡片与折线各说一套 */
+  function cashReceived(days) {
+    const from = days ? since(days) : '';
+    let amount = 0, notes = 0;
+    DB.list('journal').forEach(j => {
+      if (j.type !== 'sales_receipt' || (from && j.date < from)) return;
+      amount += DB.lines('journal_lines', j.no).reduce((s, l) => s + (l.account === '1002' ? (l.debit || 0) : 0), 0);
+      notes++;
+    });
+    const refunds = DB.where('receipt', r => r.amount < 0 && (!from || r.date >= from));
+    return { amount: r2(amount), notes, refundAmount: r2(refunds.reduce((s, r) => s + (-r.amount), 0)), refundNotes: refunds.length };
   }
 
   function board() {
@@ -35,8 +68,8 @@ window.DASH = (function () {
     const keys = monthKeys(6);
     const series = revenueByMonth(keys);
     const cur = series.rev[5] || 0, prev = series.rev[4] || 0;
-    const trend = prev ? (cur - prev) / prev * 100 : 0;
-    const gM = cur && series.cogs[5] ? (cur - series.cogs[5]) / cur * 100 : 0;
+    const gM = cur ? (cur - series.cogs[5]) / cur * 100 : 0;
+    const gMPrev = series.rev[4] ? (series.rev[4] - series.cogs[4]) / series.rev[4] * 100 : gM;
 
     const ar = r2(DB.list('invoice').reduce((s, i) => s + (i.balance || 0), 0));
     const ap = r2(DB.list('bill').reduce((s, b) => s + (b.balance || 0), 0));
@@ -45,12 +78,23 @@ window.DASH = (function () {
     const lowStock = DB.where('stock', s => s.status !== 'normal');
     const openSO = DB.where('sales_order', o => ['confirmed', 'partial'].indexOf(o.status) >= 0);
     const overdueInv = DB.where('invoice', i => i.status === 'overdue');
-    const periodSales = r2(DB.where('sales_order', o => inPeriod(o.date, D)).reduce((s, o) => s + o.total, 0));
+    /* 卡片值是「近 D 天订单额」,环比就必须用同一个指标跟上一个等长窗口比;
+       以前拿本月发票收入环比去解释订单额,箭头方向经常和数字反着走。
+       上一个窗口没有订单时不给箭头,拿 0% 装平涨是骗人 */
+    const winSO = (from, to) => DB.where('sales_order', o => o.status !== 'cancelled' && o.date >= from && o.date < to);
+    const salesCnt = winSO(since(D), DB.addDays(DB.today(), 1));
+    const periodSales = r2(salesCnt.reduce((s, o) => s + o.total, 0));
+    const prevWin = winSO(since(D * 2), since(D));
+    const prevSales = r2(prevWin.reduce((s, o) => s + o.total, 0));
+    const salesTrend = prevWin.length && prevSales ? (periodSales - prevSales) / prevSales * 100 : null;
+    const rc = cashReceived(D);
+    /* 毛利率的环比是「百分点」而不是百分比,塞进 trend 会被渲染成 +23.3%,写进脚注更诚实 */
+    const gmFoot = `收入 ¥${UI.compact(cur)} · 成本 ¥${UI.compact(series.cogs[5])} · 取总账发生额${prev ? ` · 上月毛利率 ${gMPrev.toFixed(1)}%` : ''}`;
 
     const kpis = `
       <div class="grid g4">
-        ${UI.kpi({ label: `近 ${D} 天销售额`, value: '¥' + UI.compact(periodSales), icon: 'trendUp', color: '#4F46E5', foot: `订单 ${DB.where('sales_order', o => inPeriod(o.date, D)).length} 张`, trend: trend })}
-        ${UI.kpi({ label: '本月毛利率', value: gM.toFixed(1) + '%', icon: 'pie', color: '#047857', foot: `收入 ¥${UI.compact(cur)} · 成本 ¥${UI.compact(series.cogs[5])}`, trend: gM - (series.rev[4] && series.cogs[4] ? (series.rev[4] - series.cogs[4]) / series.rev[4] * 100 : gM) })}
+        ${UI.kpi({ label: `近 ${D} 天销售额`, value: '¥' + UI.compact(periodSales), icon: 'trendUp', color: '#4F46E5', foot: `有效订单 ${salesCnt.length} 张(不含草稿与已取消)${prevWin.length ? ` · 上一 ${D} 天 ${prevWin.length} 张 ¥${UI.compact(prevSales)}` : ' · 上一个同长窗口无订单,不做环比'}`, trend: salesTrend })}
+        ${UI.kpi({ label: '本月毛利率', value: gM.toFixed(1) + '%', icon: 'pie', color: '#047857', foot: gmFoot })}
         ${UI.kpi({ label: '应收账款余额', value: '¥' + UI.compact(ar), icon: 'receipt', color: '#B45309', foot: `逾期 ${overdueInv.length} 张 ¥${UI.compact(r2(overdueInv.reduce((s, i) => s + i.balance, 0)))}` })}
         ${UI.kpi({ label: '应付账款余额', value: '¥' + UI.compact(ap), icon: 'card', color: '#DC2626', foot: `供应商 ${DB.count('suppliers')} 家 · 未清账单 ${DB.where('bill', b => b.balance > 0).length} 张` })}
       </div>
@@ -58,7 +102,7 @@ window.DASH = (function () {
         ${UI.kpi({ label: '库存资金占用', value: '¥' + UI.compact(invValue), icon: 'layers', color: '#0E7490', foot: `SKU ${DB.count('products')} · 预警 ${lowStock.length} 条` })}
         ${UI.kpi({ label: '银行存款', value: '¥' + UI.compact(cash), icon: 'wallet', color: '#7C3AED', foot: '科目 1002 · 招行杭州分行' })}
         ${UI.kpi({ label: '未清销售订单', value: num(openSO.length) + '<small> 张</small>', icon: 'file', color: '#F59E0B', foot: `待发货 ${openSO.filter(o => o.status === 'confirmed').length} · 部分出库 ${openSO.filter(o => o.status === 'partial').length}` })}
-        ${UI.kpi({ label: '本期回款', value: '¥' + UI.compact(r2(DB.where('receipt', r => inPeriod(r.date, D)).reduce((s, r) => s + r.amount, 0))), icon: 'check', color: '#10B981', foot: `收款单 ${DB.where('receipt', r => inPeriod(r.date, D)).length} 张` })}
+        ${UI.kpi({ label: '本期回款', value: '¥' + UI.compact(rc.amount), icon: 'check', color: '#10B981', foot: `收款凭证 ${rc.notes} 张${rc.refundNotes ? ` · 另有售后退款 ¥${UI.compact(rc.refundAmount)} 走 rma_refund,不计入回款` : ''}` })}
       </div>`;
 
     /* 趋势图 */
@@ -100,7 +144,7 @@ window.DASH = (function () {
     const alertHTML = alertRows.length ? UI.table([
       { k: 'product', label: '物料', render: r => `<span class="mono cell-link" data-open="products=${encodeURIComponent(r.product)}">${esc(r.product)}</span>` },
       { k: 'name', label: '商品名称', render: r => `<span class="cell-main">${esc(r.product_name)}</span><div class="cell-sub">${esc((DB.find('warehouses', r.warehouse) || {}).name || r.warehouse)}</div>` },
-      { k: 'available', label: '可用', align: 'right', render: r => `<span class="money" style="color:${r.available <= 0 ? 'var(--danger)' : 'var(--warning)'}">${num(r.available)}</span>` },
+      { k: 'available', label: '现货可用', align: 'right', render: r => `<span class="money" title="现量 ${num(r.qty)} − 订单占用 ${num(r.reserved)} − 待检/冻结批次 ${num(r.qty - r.reserved - r.available)}" style="color:${r.available <= 0 ? 'var(--danger)' : 'var(--warning)'}">${num(r.available)}</span>` },
       { k: 'safety', label: '安全库存', align: 'right', render: r => `<span class="money muted">${num((DB.find('products', r.product) || {}).safety_qty)}</span>` },
       { k: 'st', label: '状态', render: r => UI.badge(r.status) },
     ], alertRows, { pk: '_id', empty: '库存水位健康,暂无预警' }) : '';
@@ -112,7 +156,7 @@ window.DASH = (function () {
     const recentOrders = DB.where('sales_order', o => o.status !== 'cancelled').sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 8);
 
     return `
-    <div class="page-head"><div><h2>经营看板</h2><div class="desc">统计区间随顶栏时间切换联动 · 数据口径:收入取已开票销售发票(不含税),成本取销售出库结转成本,库存取移动加权平均成本。当前账套 <span class="mono">${esc(DB.all().meta.company)}</span>。</div></div>
+    <div class="page-head"><div><h2>经营看板</h2><div class="desc">统计区间随顶栏时间切换联动 · 数据口径:收入取损益「收入类」科目贷方净额,成本取「成本类」科目借方净额,均与利润表同一总账来源;库存取移动加权平均成本。当前账套 <span class="mono">${esc(DB.all().meta.company)}</span>。</div></div>
       <div class="page-actions"><button class="btn" data-new-doc="purchase_req">${icon('clipboard')}发起采购申请</button><button class="btn primary" data-new-doc="sales_order">${icon('plus')}新建销售订单</button></div></div>
     ${kpis}
     <div class="grid g-2-1 mt16">
@@ -124,7 +168,7 @@ window.DASH = (function () {
         <div class="card-body">${UI.hbars(topCust, { links: 'customers' })}</div></div>
       <div class="card"><div class="card-head"><h3>${icon('warn')}库存预警</h3><div class="right"><span class="badge b-warning">${lowStock.length} 条</span>
         <button class="btn sm ghost" data-route="reports/shortage">缺料分析</button></div></div>${alertHTML || `<div class="card-body">${UI.emptyBox('库存水位健康') }</div>`}
-        <div class="table-foot">${UI.cellRef('warehouses', 'WH-HZ01')} 等 ${DB.count('warehouses')} 个仓库 · 缺口按 MRP 口径可用量 = 现量 − 占用 + 在途计算</div></div>
+        <div class="table-foot">${UI.cellRef('warehouses', 'WH-HZ01')} 等 ${DB.count('warehouses')} 个仓库 · 本表「现货可用」= 现量 − 订单占用 − 待检冻结,是能马上发的量;缺料分析页另加「在途采购 + 在制委外」才是 MRP 供给口径,两数不同属正常,点「缺料分析」核对</div></div>
     </div>
     <div class="grid g-2-1 mt16">
       <div class="card"><div class="card-head"><h3>${icon('file')}最近销售订单</h3><div class="right"><button class="btn sm" data-route="sales_order">进入模块</button></div></div>
@@ -198,7 +242,7 @@ window.DASH = (function () {
     add('待收货采购订单', poWait, '到货后需录入采购收货单', 'purchase_order', '去收货', 'b-info');
     add('货到票未到待清算', grNoBill, '收货已按不含税成本暂估入账 贷2203,需录入采购发票冲销暂估', 'gr', '录入发票', 'b-purple');
     add('来料待检验批次', qcWait, `待检仓在隔离 ${num(qcQty)} 件,品质经理判定前不可销售与领用`, 'iqc', '去判定', 'b-warning');
-    add('来料不合格待处置', qcNg, '让步接收已折价冲减暂估并扣供应商评分,拒收批次退货结案', 'suppliers', '跟进', 'b-danger');
+    add('来料不合格待处置', qcNg, '让步接收已折价冲减暂估并扣供应商评分,拒收批次退货结案', 'iqc', '去处置', 'b-danger');
     add('逾期未收发票', overdue, '已超出信用到期日,建议立即催收', 'invoice', '催收', 'b-danger');
     add('待收款发票', openInv, '到期未过 30 天的正常应收', 'invoice', '登记收款', 'b-warning');
     add('逾期未付账单', overdueBill, '可能影响供应商信用,请安排付款', 'bill', '去付款', 'b-danger');
@@ -297,5 +341,5 @@ window.DASH = (function () {
     }));
   }
 
-  return { board, todo, bind: { todo, dashboard: () => { } }, todoItems, todoStats, arAging, monthKeys, revenueByMonth, inPeriod, since };
+  return { board, todo, bind: { todo, dashboard: () => { } }, todoItems, todoStats, arAging, monthKeys, revenueByMonth, cashReceived, inPeriod, since };
 })();

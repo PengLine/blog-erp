@@ -49,6 +49,17 @@ window.REPORTS = (function () {
     });
     const rows = Object.values(byPartner).sort((a, b) => b.total - a.total);
     const grand = r2(totals.reduce((a, b) => a + b, 0));
+    /* 红字贷项是负余额,不参与账龄分档,但要让报表能一句话回到总账:否则看板 917,400.97 与本页差一万多没人解释 */
+    const creditRows = DB.list(kind === 'ar' ? 'invoice' : 'bill').filter(d => d.status !== 'cancelled' && (d.balance || 0) <= -0.01);
+    const credits = r2(creditRows.reduce((a, d) => a + d.balance, 0));
+    const netGL = r2(grand + credits);
+    const glAccCode = kind === 'ar' ? '1122' : '2202';
+    const glAcc = glAccCode + (kind === 'ar' ? ' 应收账款' : ' 应付账款');
+    /* 总账侧余额:1122 借余为正,2202 贷余要翻成同样的「欠多少」口径 */
+    const glSigned = r2(DB.list('journal_lines').filter(l => l.account === glAccCode)
+      .reduce((s, l) => s + (l.debit || 0) - (l.credit || 0), 0));
+    const glOpenBalance = kind === 'ar' ? glSigned : r2(-glSigned);
+    const glTied = Math.abs(netGL - glOpenBalance) < 0.01;
     const overdue = r2(totals.slice(1).reduce((a, b) => a + b, 0));
     const dso = kind === 'ar' ? daysSalesOutstanding(docs) : daysPayable(docs);
 
@@ -75,6 +86,7 @@ window.REPORTS = (function () {
           <ul style="margin:0;padding-left:18px;line-height:2;color:var(--text-2);font-size:13px">
             <li>分档基准:单据 <b>到期日(due_date)</b> 与当前系统日期 ${dateCN(today)} 的差值。</li>
             <li>余额口径:<b>未结金额 = 价税合计 − 已收/已付金额</b>,已含部分结算单据的剩余部分。</li>
+            <li>${creditRows.length ? `${num(creditRows.length)} 张红字贷项合计 <b>−¥${money(-credits)}</b>,为负余额,不参与账龄分档` : '本期没有红字贷项'};${kind === 'ar' ? '应收' : '应付'}净额 <b style="color:var(--${glTied ? 'success' : 'danger'})">¥${money(netGL)}</b> 与总账 <span class="mono">${glAcc}</span> 未结余额 <b>¥${money(glOpenBalance)}</b> ${glTied ? '一致' : '不符,差 ¥' + money(netGL - glOpenBalance)}。</li>
             <li>结算方式影响账期:货到付款 7 天、月结 30/45/60 天由往来单位主数据决定。</li>
             <li>点击${kind === 'ar' ? '客户' : '供应商'}名称可查看其往来画像与全部${kind === 'ar' ? '发票' : '账单'}。</li>
           </ul></div></div>
@@ -144,6 +156,24 @@ window.REPORTS = (function () {
   }
 
   /* ---------------- 销售分析 ---------------- */
+  /* 总账口径的累计收入/成本:与利润表同一套科目,只是不分期间,用来给标准成本毛利做锚 */
+  function glRevCost() {
+    const revAcc = {}, costAcc = {};
+    DB.list('gl_account').forEach(a => {
+      if (a.type === 'revenue') revAcc[a.code] = 1;
+      else if (a.type === 'cost') costAcc[a.code] = 1;
+    });
+    const skip = {};
+    DB.where('journal', j => j.type === 'close').forEach(j => { skip[j.no] = 1; });
+    let rev = 0, cost = 0;
+    DB.list('journal_lines').forEach(l => {
+      if (skip[l.doc]) return;
+      if (revAcc[l.account]) rev += (l.credit || 0) - (l.debit || 0);
+      else if (costAcc[l.account]) cost += (l.debit || 0) - (l.credit || 0);
+    });
+    return { rev: r2(rev), cost: r2(cost), gp: r2(rev - cost), margin: rev ? (rev - cost) / rev * 100 : 0 };
+  }
+
   function sales() {
     const keys = DASH.monthKeys(6);
     const s = DASH.revenueByMonth(keys);
@@ -164,13 +194,25 @@ window.REPORTS = (function () {
       .map(c => ({ name: (DB.find('customers', c) || {}).name || c, value: r2(byCust[c]), key: c }));
     const soStat = ['draft', 'confirmed', 'partial', 'done', 'cancelled'].map(st => ({ st, n: DB.where('sales_order', o => o.status === st).length, v: r2(DB.where('sales_order', o => o.status === st).reduce((a, o) => a + o.total, 0)) }));
 
+    const gl = glRevCost();
+    const stdGm = totalAmt ? (totalAmt - totalCost) / totalAmt * 100 : 0;
+    const gpGap = r2((totalAmt - totalCost) - gl.gp);          /* 标准成本毛利 − 实际成本毛利,正数说明标准成本把毛利算高了 */
+    const costGap = r2(totalCost - gl.cost);                    /* 标准成本 − 实际结转 */
+    const revGap = r2(gl.rev - totalAmt);
+
     return head('sales', `<button class="btn primary" data-new-doc="sales_order">${icon('plus')}新建销售订单</button>`) + `
       <div class="grid g4">
-        ${UI.kpi({ label: '累计开票收入(不含税)', value: '¥' + UI.compact(totalAmt), icon: 'trendUp', color: '#4F46E5', foot: `${DB.count('invoice')} 张发票` })}
-        ${UI.kpi({ label: '累计销售成本', value: '¥' + UI.compact(totalCost), icon: 'box', color: '#F59E0B', foot: `毛利 ¥${UI.compact(r2(totalAmt - totalCost))}` })}
-        ${UI.kpi({ label: '综合毛利率', value: (totalAmt ? (totalAmt - totalCost) / totalAmt * 100 : 0).toFixed(1) + '%', icon: 'pie', color: '#047857', foot: '标准成本口径' })}
+        ${UI.kpi({ label: '累计开票收入(不含税)', value: '¥' + UI.compact(totalAmt), icon: 'trendUp', color: '#4F46E5', foot: `${DB.count('invoice')} 张发票 · 总账收入 ¥${UI.compact(gl.rev)}` })}
+        ${UI.kpi({ label: '累计销售成本(标准)', value: '¥' + UI.compact(totalCost), icon: 'box', color: '#F59E0B', foot: `总账实际结转 ¥${UI.compact(gl.cost)} · 成本差 ¥${UI.compact(costGap)}` })}
+        ${UI.kpi({ label: '毛利率(总账实际成本)', value: gl.margin.toFixed(1) + '%', icon: 'pie', color: '#047857', foot: `与利润表同源 · 标准成本口径 ${stdGm.toFixed(1)}%,虚高 ${(stdGm - gl.margin).toFixed(1)} 个点` })}
         ${UI.kpi({ label: '客单平均金额', value: '¥' + money(DB.count('invoice') ? totalAmt / DB.count('invoice') : 0), icon: 'users', color: '#0E7490', foot: `${DB.count('customers')} 家客户` })}
       </div>
+      <div class="notice mt16">${icon('info')}<div>两套毛利都保留,但分工不同:下表按<b>商品标准成本</b>估各 SKU 毛利,用于定价与选品;
+        本卡取<b>总账实际成本</b>(出库结转的移动加权成本,并含售后退货冲回、盘盈亏),与利润表逐笔同源。
+        开票收入 ¥${money(totalAmt)} 与总账收入 ¥${money(gl.rev)} 差 ¥${money(revGap)}(${revGap >= 0 ? '盘盈等其他业务收入直接进总账,不走发票' : '红字发票冲销早于开票口径'});
+        标准成本 ¥${money(totalCost)} 比实际结转 ¥${money(gl.cost)} ${costGap >= 0 ? '高' : '低'} ¥${money(Math.abs(costGap))},${costGap >= 0 ? '实际成本被材料涨价与暂估补差抬高' : '商品档案的标准成本已低于实际移动加权成本'};
+        两头合成后毛利虚${gpGap >= 0 ? '高' : '低'} ¥${money(Math.abs(gpGap))}(${(stdGm - gl.margin).toFixed(1)} 个点)——
+        定价看标准成本,考核与报表看实际成本。</div></div>
       <div class="card mt16"><div class="card-head"><h3>${icon('chart')}月度收入 / 成本 / 回款趋势</h3></div><div class="card-body">
         ${UI.lineChart([{ name: '收入', color: '#4F46E5', data: s.rev, area: true }, { name: '成本', color: '#F59E0B', data: s.cogs }, { name: '回款', color: '#10B981', data: s.cash }], keys.map(k => k.slice(2)))}</div></div>
       <div class="grid g2 mt16">
@@ -186,8 +228,8 @@ window.REPORTS = (function () {
           { k: 'cat', label: '类目', render: r => `<span class="tag">${esc((DB.find('products', r.code) || {}).category || '')}</span>` },
           { k: 'qty', label: '销量', align: 'right', render: r => num(r.qty) },
           { k: 'amount', label: '收入', align: 'right', render: r => '¥' + money(r.amount) },
-          { k: 'gp', label: '毛利', align: 'right', render: r => `<span class="money">${money(r2(r.amount - r.cost))}</span>` },
-          { k: 'gpr', label: '毛利率', align: 'right', render: r => { const g = r.amount ? (r.amount - r.cost) / r.amount * 100 : 0; return `<span class="badge ${g > 45 ? 'b-success' : g > 25 ? 'b-warning' : 'b-danger'}">${g.toFixed(1)}%</span>`; } },
+          { k: 'gp', label: '毛利(标准成本)', align: 'right', render: r => `<span class="money">${money(r2(r.amount - r.cost))}</span>` },
+          { k: 'gpr', label: '毛利率(标准成本)', align: 'right', render: r => { const g = r.amount ? (r.amount - r.cost) / r.amount * 100 : 0; return `<span class="badge ${g > 45 ? 'b-success' : g > 25 ? 'b-warning' : 'b-danger'}">${g.toFixed(1)}%</span>`; } },
           { k: 'share', label: '占比', render: r => `<div class="flex" style="gap:8px"><div class="progress" style="width:80px"><i style="width:${(r.amount / totalAmt * 100).toFixed(1)}%"></i></div><span class="small muted">${(r.amount / totalAmt * 100).toFixed(1)}%</span></div>` },
         ], prods.slice(0, 20), { pk: 'code' })}</div>
       <div class="card mt16"><div class="card-head"><h3>${icon('grid')}订单状态漏斗</h3></div>

@@ -204,7 +204,9 @@
           const isEnt = SCHEMA.entities[route];
           const active = state.route === route || (isEnt && ent === route);
           const cnt = isEnt ? countBadge(route) : (ordCnt[route] || null);
-          return `<div class="nav-item ${active ? 'active' : ''}" data-route="${route}" title="${it.label}">${UI.icon(it.icon)}<span class="nav-label">${it.label}</span>${cnt ? `<span class="cnt">${cnt}</span>` : ''}</div>`;
+          const tip = SCHEMA.entities[route] && SCHEMA.entities[route].statusField ? cnt + ' 张未收口单据(含草稿)' + (route === 'sales_order' ? ',订单中心的「执行中」不含草稿' : '')
+            : (route === 'todo' ? cnt + ' 项待办,分布在 ' + DASH.todoStats().groups + ' 个业务环节' : (route === 'orders' ? cnt + ' 张已审核未收口的执行中订单' : (route === 'approvals' ? cnt + ' 条待审批' : it.label)));
+          return `<div class="nav-item ${active ? 'active' : ''}" data-route="${route}" title="${esc(it.label)} · ${esc(tip)}">${UI.icon(it.icon)}<span class="nav-label">${it.label}</span>${cnt ? `<span class="cnt">${cnt}</span>` : ''}</div>`;
         }).join('')}`;
       }).join('')}
       </nav>
